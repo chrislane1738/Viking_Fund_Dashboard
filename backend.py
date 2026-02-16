@@ -7,10 +7,16 @@ import streamlit as st
 from supabase import create_client, Client
 
 # ── Friendly error messages ──────────────────────────────────────────
+MAX_GROUPS = 3
+MAX_STOCKS_PER_GROUP = 10
+MAX_COMPARISON_GROUPS = 3
+
 _ERROR_MAP = {
     "User already registered": "An account with this email already exists.",
     "Invalid login credentials": "Invalid email or password.",
     "duplicate key value violates unique constraint": "This entry already exists.",
+    "watchlist_groups_user_id_name_key": "A group with this name already exists.",
+    "watchlists_group_id_ticker_key": "This ticker is already in this group.",
     "Email not confirmed": "Please confirm your email before signing in.",
 }
 
@@ -79,7 +85,7 @@ def sign_out():
     except Exception:
         pass
     for key in list(st.session_state.keys()):
-        if key.startswith("user_") or key in (
+        if key.startswith("user_") or key.startswith("wl_") or key in (
             "authenticated", "user", "wl_cache_v", "notes_cache_v",
             "_access_token", "_refresh_token",
         ):
@@ -150,28 +156,112 @@ def update_profile(user_id: str, **fields) -> dict:
 
 
 # ═════════════════════════════════════════════════════════════════════
+# WATCHLIST GROUPS
+# ═════════════════════════════════════════════════════════════════════
+
+def get_watchlist_groups(user_id: str) -> list | tuple:
+    """Return all watchlist groups for user, ordered by position.
+    Returns list on success, or ([], error_string) on failure."""
+    try:
+        res = (_sb().table("watchlist_groups")
+               .select("*")
+               .eq("user_id", user_id)
+               .order("position")
+               .execute())
+        return res.data or []
+    except Exception as e:
+        return ([], str(e))
+
+
+def create_watchlist_group(user_id: str, name: str) -> dict:
+    """Create a new watchlist group. Returns {success, group, error}."""
+    try:
+        existing = get_watchlist_groups(user_id)
+        if len(existing) >= MAX_GROUPS:
+            return {"success": False, "group": None,
+                    "error": f"Maximum of {MAX_GROUPS} groups allowed."}
+        used_positions = {g["position"] for g in existing}
+        next_pos = next(p for p in range(MAX_GROUPS) if p not in used_positions)
+        row = {"user_id": user_id, "name": name.strip(), "position": next_pos}
+        res = _sb().table("watchlist_groups").insert(row).execute()
+        invalidate_watchlist_cache()
+        return {"success": True, "group": res.data[0] if res.data else None, "error": None}
+    except Exception as e:
+        return {"success": False, "group": None, "error": _friendly_error(str(e))}
+
+
+def rename_watchlist_group(group_id: str, user_id: str, new_name: str) -> dict:
+    """Rename a watchlist group. Returns {success, error}."""
+    try:
+        _sb().table("watchlist_groups").update({"name": new_name.strip()}).eq("id", group_id).eq("user_id", user_id).execute()
+        invalidate_watchlist_cache()
+        return {"success": True, "error": None}
+    except Exception as e:
+        return {"success": False, "error": _friendly_error(str(e))}
+
+
+def delete_watchlist_group(group_id: str, user_id: str) -> dict:
+    """Delete a watchlist group (CASCADE deletes its entries). Returns {success, error}."""
+    try:
+        _sb().table("watchlist_groups").delete().eq("id", group_id).eq("user_id", user_id).execute()
+        invalidate_watchlist_cache()
+        return {"success": True, "error": None}
+    except Exception as e:
+        return {"success": False, "error": _friendly_error(str(e))}
+
+
+def ensure_default_group(user_id: str) -> list | tuple:
+    """Ensure all 3 default groups exist. Returns sorted list or ([], error)."""
+    _DEFAULT_NAMES = ["Group 1", "Group 2", "Group 3"]
+    groups = get_watchlist_groups(user_id)
+    if isinstance(groups, tuple):
+        return groups  # ([], error_string)
+    existing_positions = {g["position"] for g in groups}
+    for pos, name in enumerate(_DEFAULT_NAMES):
+        if pos not in existing_positions:
+            try:
+                row = {"user_id": user_id, "name": name, "position": pos}
+                _sb().table("watchlist_groups").insert(row).execute()
+            except Exception:
+                pass  # may already exist by name
+    # Re-fetch to get the full sorted list
+    groups = get_watchlist_groups(user_id)
+    if isinstance(groups, tuple):
+        return groups
+    invalidate_watchlist_cache()
+    return groups
+
+
+# ═════════════════════════════════════════════════════════════════════
 # WATCHLIST
 # ═════════════════════════════════════════════════════════════════════
 
-def get_watchlist(user_id: str) -> list:
-    """Return all watchlist items for user, newest first."""
+def get_watchlist(user_id: str, group_id: str | None = None) -> list:
+    """Return watchlist items for user, optionally filtered by group, newest first."""
     try:
-        res = (_sb().table("watchlists")
-               .select("*")
-               .eq("user_id", user_id)
-               .order("added_at", desc=True)
-               .execute())
+        q = (_sb().table("watchlists")
+             .select("*")
+             .eq("user_id", user_id))
+        if group_id:
+            q = q.eq("group_id", group_id)
+        res = q.order("added_at", desc=True).execute()
         return res.data or []
     except Exception:
         return []
 
 
-def add_to_watchlist(user_id: str, ticker: str, notes: str | None = None) -> dict:
-    """Add a ticker to the watchlist. Returns {success, error}."""
+def add_to_watchlist(user_id: str, ticker: str, group_id: str, notes: str | None = None) -> dict:
+    """Add a ticker to a watchlist group. Returns {success, error}."""
     try:
+        # Enforce per-group stock limit
+        current = get_watchlist(user_id, group_id)
+        if len(current) >= MAX_STOCKS_PER_GROUP:
+            return {"success": False,
+                    "error": f"Maximum of {MAX_STOCKS_PER_GROUP} stocks per group."}
         _sb().table("watchlists").insert({
             "user_id": user_id,
             "ticker": ticker.upper(),
+            "group_id": group_id,
             "notes": notes,
         }).execute()
         invalidate_watchlist_cache()
@@ -180,27 +270,45 @@ def add_to_watchlist(user_id: str, ticker: str, notes: str | None = None) -> dic
         return {"success": False, "error": _friendly_error(str(e))}
 
 
-def remove_from_watchlist(user_id: str, ticker: str) -> dict:
-    """Remove a ticker from the watchlist. Returns {success, error}."""
+def remove_from_watchlist(user_id: str, ticker: str, group_id: str | None = None) -> dict:
+    """Remove a ticker from the watchlist. Scoped to group when provided."""
     try:
-        _sb().table("watchlists").delete().eq("user_id", user_id).eq("ticker", ticker.upper()).execute()
+        q = _sb().table("watchlists").delete().eq("user_id", user_id).eq("ticker", ticker.upper())
+        if group_id:
+            q = q.eq("group_id", group_id)
+        q.execute()
         invalidate_watchlist_cache()
         return {"success": True, "error": None}
     except Exception as e:
         return {"success": False, "error": _friendly_error(str(e))}
 
 
-def is_in_watchlist(user_id: str, ticker: str) -> bool:
-    """Check if a ticker is already in the user's watchlist."""
+def is_in_watchlist(user_id: str, ticker: str, group_id: str | None = None) -> bool:
+    """Check if a ticker is in the user's watchlist (any or specific group)."""
     try:
-        res = (_sb().table("watchlists")
-               .select("id")
-               .eq("user_id", user_id)
-               .eq("ticker", ticker.upper())
-               .execute())
+        q = (_sb().table("watchlists")
+             .select("id")
+             .eq("user_id", user_id)
+             .eq("ticker", ticker.upper()))
+        if group_id:
+            q = q.eq("group_id", group_id)
+        res = q.execute()
         return len(res.data) > 0
     except Exception:
         return False
+
+
+def get_ticker_groups(user_id: str, ticker: str) -> list:
+    """Return list of group_ids that contain this ticker for the user."""
+    try:
+        res = (_sb().table("watchlists")
+               .select("group_id")
+               .eq("user_id", user_id)
+               .eq("ticker", ticker.upper())
+               .execute())
+        return [r["group_id"] for r in (res.data or [])]
+    except Exception:
+        return []
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -299,12 +407,12 @@ def get_activity(user_id: str, limit: int = 100) -> list:
 # ═════════════════════════════════════════════════════════════════════
 
 @st.cache_data(ttl=300, show_spinner=False)
-def fetch_watchlist_cached(user_id: str, _v: int) -> list:
-    return get_watchlist(user_id)
+def fetch_watchlist_cached(user_id: str, group_id: str | None, cache_v: int) -> list:
+    return get_watchlist(user_id, group_id)
 
 
 @st.cache_data(ttl=300, show_spinner=False)
-def fetch_notes_cached(user_id: str, ticker: str | None, _v: int) -> list:
+def fetch_notes_cached(user_id: str, ticker: str | None, cache_v: int) -> list:
     return get_notes(user_id, ticker)
 
 
@@ -314,3 +422,55 @@ def invalidate_watchlist_cache():
 
 def invalidate_notes_cache():
     st.session_state["notes_cache_v"] = st.session_state.get("notes_cache_v", 0) + 1
+
+
+# ═════════════════════════════════════════════════════════════════════
+# COMPARISON GROUPS
+# ═════════════════════════════════════════════════════════════════════
+
+def get_comparison_groups(user_id: str) -> list:
+    """Return all comparison groups for user, ordered by created_at."""
+    try:
+        res = (_sb().table("comparison_groups")
+               .select("*")
+               .eq("user_id", user_id)
+               .order("created_at")
+               .execute())
+        return res.data or []
+    except Exception:
+        return []
+
+
+def save_comparison_group(user_id: str, name: str, tickers: list) -> dict:
+    """Upsert a comparison group. Returns {success, error}."""
+    try:
+        existing = get_comparison_groups(user_id)
+        existing_names = {g["name"] for g in existing}
+        if name not in existing_names and len(existing) >= MAX_COMPARISON_GROUPS:
+            return {"success": False,
+                    "error": f"Maximum of {MAX_COMPARISON_GROUPS} comparison groups allowed."}
+        _sb().table("comparison_groups").upsert(
+            {"user_id": user_id, "name": name.strip(), "tickers": tickers},
+            on_conflict="user_id,name",
+        ).execute()
+        return {"success": True, "error": None}
+    except Exception as e:
+        return {"success": False, "error": _friendly_error(str(e))}
+
+
+def delete_comparison_group(group_id: str, user_id: str) -> dict:
+    """Delete a comparison group by id. Returns {success, error}."""
+    try:
+        _sb().table("comparison_groups").delete().eq("id", group_id).eq("user_id", user_id).execute()
+        return {"success": True, "error": None}
+    except Exception as e:
+        return {"success": False, "error": _friendly_error(str(e))}
+
+
+def rename_comparison_group(group_id: str, user_id: str, new_name: str) -> dict:
+    """Rename a comparison group. Returns {success, error}."""
+    try:
+        _sb().table("comparison_groups").update({"name": new_name.strip()}).eq("id", group_id).eq("user_id", user_id).execute()
+        return {"success": True, "error": None}
+    except Exception as e:
+        return {"success": False, "error": _friendly_error(str(e))}

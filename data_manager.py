@@ -341,6 +341,7 @@ class FMPProvider(DataProvider):
 
         # Forward PE from analyst estimates
         forward_pe = None
+        forward_peg = None
         try:
             estimates = _fmp_get("analyst-estimates", {"symbol": ticker, "period": "annual", "limit": 10})
             if isinstance(estimates, list) and estimates:
@@ -348,11 +349,19 @@ class FMPProvider(DataProvider):
                 # Find the nearest future fiscal year estimate with epsAvg
                 for est in sorted(estimates, key=lambda e: e.get("date", ""), reverse=False):
                     est_date = datetime.strptime(est["date"], "%Y-%m-%d") if est.get("date") else None
-                    eps_avg = est.get("epsAvg")
-                    if est_date and est_date > today and eps_avg and eps_avg != 0:
+                    forward_eps_avg = est.get("epsAvg")
+                    if est_date and est_date > today and forward_eps_avg and forward_eps_avg != 0:
                         price_now = profile.get("price")
                         if price_now and price_now > 0:
-                            forward_pe = price_now / eps_avg
+                            forward_pe = price_now / forward_eps_avg
+                            # Forward PEG: forward_pe / implied EPS growth rate
+                            trailing_pe = ratios_ttm.get("priceToEarningsRatioTTM")
+                            if trailing_pe and trailing_pe > 0:
+                                current_eps = price_now / trailing_pe
+                                if current_eps and abs(current_eps) > 0:
+                                    growth_rate = ((forward_eps_avg - current_eps) / abs(current_eps)) * 100
+                                    if growth_rate > 0:
+                                        forward_peg = forward_pe / growth_rate
                         break
         except Exception:
             pass
@@ -386,6 +395,7 @@ class FMPProvider(DataProvider):
             "price_to_sales": ratios_ttm.get("priceToSalesRatioTTM"),
             "price_to_book": ratios_ttm.get("priceToBookRatioTTM"),
             "ev_to_ebitda": ratios_ttm.get("enterpriseValueMultipleTTM"),
+            "forward_peg": forward_peg,
             # Dividend
             "dividend_yield": ratios_ttm.get("dividendYieldTTM"),
             "payout_ratio": ratios_ttm.get("dividendPayoutRatioTTM"),
@@ -401,6 +411,8 @@ class FMPProvider(DataProvider):
             # Net debt
             "total_cash": bs_latest.get("cashAndShortTermInvestments") or bs_latest.get("cashAndCashEquivalents"),
             "total_debt": bs_latest.get("totalDebt"),
+            # Debt to equity
+            "debt_to_equity": ratios_ttm.get("debtToEquityRatioTTM"),
             # Logo
             "logo_url": profile.get("image", f"https://financialmodelingprep.com/image-stock/{ticker}.png"),
         }
@@ -955,6 +967,8 @@ if _HAS_YFINANCE:
                 "price_to_sales": info.get("priceToSalesTrailing12Months"),
                 "price_to_book": info.get("priceToBook"),
                 "ev_to_ebitda": info.get("enterpriseToEbitda"),
+                "forward_peg": None,
+                "debt_to_equity": info.get("debtToEquity"),
                 "dividend_yield": info.get("trailingAnnualDividendYield"),
                 "payout_ratio": info.get("payoutRatio"),
                 "ex_dividend_date": info.get("exDividendDate"),

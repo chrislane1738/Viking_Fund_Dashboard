@@ -74,6 +74,8 @@ st.session_state.setdefault("authenticated", False)
 st.session_state.setdefault("user", None)
 st.session_state.setdefault("wl_cache_v", 0)
 st.session_state.setdefault("notes_cache_v", 0)
+st.session_state.setdefault("wl_active_group_idx", 0)
+st.session_state.setdefault("wl_dip_ma", 200)
 
 
 def _render_auth_page():
@@ -96,9 +98,11 @@ def _render_auth_page():
         tab_in, tab_up = st.tabs(["Sign In", "Sign Up"])
 
         with tab_in:
-            email = st.text_input("Email", key="login_email")
-            password = st.text_input("Password", type="password", key="login_password")
-            if st.button("Sign In", width="stretch", type="primary"):
+            with st.form("login_form"):
+                email = st.text_input("Email", key="login_email")
+                password = st.text_input("Password", type="password", key="login_password")
+                submitted = st.form_submit_button("Sign In", use_container_width=True, type="primary")
+            if submitted:
                 if not email or not password:
                     st.error("Please enter both email and password.")
                 else:
@@ -158,9 +162,23 @@ if not st.session_state["authenticated"]:
             "student_id": profile.get("student_id", "") if profile else "",
         }
 
-if not st.session_state["authenticated"]:
-    _render_auth_page()
-    st.stop()
+# DEV MODE: bypass login screen (re-enable before production push)
+_DEV_BYPASS_AUTH = False
+
+if not _DEV_BYPASS_AUTH:
+    if not st.session_state["authenticated"]:
+        _render_auth_page()
+        st.stop()
+
+if _DEV_BYPASS_AUTH and not st.session_state["authenticated"]:
+    st.session_state["authenticated"] = True
+    st.session_state["user"] = {
+        "id": "dev-user",
+        "email": "dev@localhost",
+        "first_name": "Dev",
+        "last_name": "User",
+        "student_id": "000000",
+    }
 
 _current_user = st.session_state["user"]
 _user_id = _current_user["id"]
@@ -195,11 +213,26 @@ def fetch_cashflow(ticker):
 def fetch_quote(ticker):
     return get_provider().get_quote(ticker)
 
+@st.cache_data(ttl=900, show_spinner=False)
+def fetch_ma(ticker, window=200):
+    """Return the N-day simple moving average for a ticker."""
+    df = get_provider().get_price_history(ticker, period="1y")
+    if df is not None and not df.empty and len(df) >= window:
+        return float(df['Close'].rolling(window).mean().iloc[-1])
+    return None
+
+def fetch_200ma(ticker):
+    return fetch_ma(ticker, 200)
+
 
 # ── Chart helpers ───────────────────────────────────────────────────
 
 CHART_CFG = {"displayModeBar": False}
 BAR_COLOR = "#4A90D9"
+COMPARISON_COLORS = [
+    "#4A90D9", "#E74C3C", "#2ECC71", "#F39C12", "#9B59B6",
+    "#1ABC9C", "#E67E22", "#3498DB", "#E91E63", "#00BCD4",
+]
 
 
 def _compute_cagr(start, end, years):
@@ -418,6 +451,78 @@ def _grouped_bar(dates, traces, title, prefix="$", auto_scale=False, stacked=Fal
         margin=dict(l=60, r=20, t=35, b=40),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
     )
+    return fig
+
+
+def _comparison_bar(tickers, values, colors, title):
+    """Vertical bar chart comparing a single metric across tickers.
+    values may contain None for unavailable data.
+    Includes full-width average (red) and median (yellow) lines."""
+    import statistics as _stats
+    display_vals = [v if v is not None else 0 for v in values]
+    text_labels = [f"{v:.2f}" if v is not None else "N/A" for v in values]
+    bar_colors = ["#1B7A3D"] * len(tickers)
+
+    valid = [v for v in values if v is not None]
+    avg_val = sum(valid) / len(valid) if valid else None
+    med_val = _stats.median(valid) if valid else None
+
+    fig = go.Figure()
+
+    # Bars
+    fig.add_trace(go.Bar(
+        x=tickers, y=display_vals,
+        marker_color=bar_colors,
+        text=text_labels,
+        textposition="outside",
+        hovertemplate="%{x}: %{text}<extra></extra>",
+        showlegend=False,
+    ))
+
+    # Full-width average & median lines using shapes (paper-relative x)
+    shapes = []
+    annotations = []
+    if avg_val is not None:
+        shapes.append(dict(
+            type="line", xref="paper", yref="y",
+            x0=0, x1=1, y0=avg_val, y1=avg_val,
+            line=dict(color="rgba(231,76,60,0.7)", width=2, dash="dash"),
+        ))
+        annotations.append(dict(
+            xref="paper", yref="y", x=1, y=avg_val,
+            text=f"Avg: {avg_val:.2f}", showarrow=False,
+            font=dict(color="rgba(231,76,60,0.9)", size=11),
+            xanchor="left", xshift=4, bgcolor="rgba(0,0,0,0.85)",
+            borderpad=4,
+        ))
+    if med_val is not None:
+        shapes.append(dict(
+            type="line", xref="paper", yref="y",
+            x0=0, x1=1, y0=med_val, y1=med_val,
+            line=dict(color="rgba(243,156,18,0.7)", width=2, dash="dot"),
+        ))
+        annotations.append(dict(
+            xref="paper", yref="y", x=1, y=med_val,
+            text=f"Med: {med_val:.2f}", showarrow=False,
+            font=dict(color="rgba(243,156,18,0.9)", size=11),
+            xanchor="left", xshift=4, bgcolor="rgba(0,0,0,0.85)",
+            borderpad=4,
+        ))
+
+    fig.update_layout(
+        title=dict(text=title, font=dict(size=14)),
+        xaxis=dict(fixedrange=True, type="category"),
+        yaxis=dict(fixedrange=True),
+        height=300,
+        margin=dict(l=60, r=60, t=35, b=40),
+        shapes=shapes,
+        annotations=annotations,
+    )
+    # Ensure text labels aren't clipped — pad y-axis above tallest bar
+    all_display = [v for v in display_vals if v]
+    if all_display:
+        y_max = max(all_display)
+        fig.update_layout(yaxis=dict(range=[0, y_max * 1.15]))
     return fig
 
 
@@ -751,107 +856,129 @@ if st.sidebar.button("Logout", width="stretch", key="logout_btn"):
 
 st.sidebar.divider()
 
-# Custom CSS for sidebar radio → selectable boxes with icons
+# Custom CSS for sidebar navigation buttons
 st.markdown("""
 <style>
-/* Turn sidebar radio options into selectable boxes */
-section[data-testid="stSidebar"] div[role="radiogroup"] {
-    gap: 0.5rem;
+/* ── Sidebar nav: lock every layer to prevent any movement ── */
+
+/* Element containers holding buttons: fixed spacing */
+section[data-testid="stSidebar"] .stElementContainer:has(.stButton) {
+    margin: 0 !important;
+    padding: 2px 0 !important;
+    min-height: 0 !important;
 }
-section[data-testid="stSidebar"] div[role="radiogroup"] > label {
-    background: rgba(128, 128, 128, 0.1);
-    border: 1px solid rgba(128, 128, 128, 0.25);
-    border-radius: 0.5rem;
-    padding: 0.6rem 0.75rem;
-    cursor: pointer;
-    transition: background 0.15s, border-color 0.15s;
-    display: flex !important;
-    align-items: center;
+
+/* The .stButton wrapper div */
+section[data-testid="stSidebar"] .stButton {
+    margin: 0 !important;
+    padding: 0 !important;
 }
-section[data-testid="stSidebar"] div[role="radiogroup"] > label:hover {
-    background: rgba(128, 128, 128, 0.2);
-}
-section[data-testid="stSidebar"] div[role="radiogroup"] > label[data-checked="true"],
-section[data-testid="stSidebar"] div[role="radiogroup"] > label:has(input:checked) {
-    background: rgba(74, 144, 217, 0.15);
-    border-color: #4A90D9;
-}
-/* Hide the default radio dot */
-section[data-testid="stSidebar"] div[role="radiogroup"] > label > div:first-child {
-    display: none;
-}
-/* Style the Home button to match the radio boxes */
-section[data-testid="stSidebar"] button[key="home_btn"],
-section[data-testid="stSidebar"] .stButton button[kind="secondary"] {
+
+/* ALL sidebar buttons — identical box model, no kind-switching */
+section[data-testid="stSidebar"] .stButton button {
+    height: 2.5rem !important;
+    min-height: 2.5rem !important;
+    max-height: 2.5rem !important;
+    padding: 0 0.75rem !important;
+    margin: 0 !important;
+    border-width: 1px !important;
+    border-style: solid !important;
+    border-radius: 0.5rem !important;
+    box-sizing: border-box !important;
+    font-weight: 400 !important;
+    font-size: inherit !important;
+    line-height: 1 !important;
+    box-shadow: none !important;
+    outline: none !important;
+    transition: none !important;
+    transform: none !important;
     background: rgba(128, 128, 128, 0.1) !important;
-    border: 1px solid rgba(128, 128, 128, 0.25) !important;
-    border-radius: 0.5rem !important;
-    padding: 0.6rem 0.75rem !important;
+    border-color: rgba(128, 128, 128, 0.25) !important;
     color: inherit !important;
-    font-weight: 400 !important;
-    transition: background 0.15s, border-color 0.15s;
 }
-section[data-testid="stSidebar"] .stButton button[kind="secondary"]:hover {
+
+/* Lock inner p tag */
+section[data-testid="stSidebar"] .stButton button p {
+    margin: 0 !important;
+    padding: 0 !important;
+}
+
+/* Hover */
+section[data-testid="stSidebar"] .stButton button:hover {
     background: rgba(128, 128, 128, 0.2) !important;
+    transform: none !important;
 }
-section[data-testid="stSidebar"] .stButton button[kind="primary"] {
+
+/* Kill focus/active animations */
+section[data-testid="stSidebar"] .stButton button:focus,
+section[data-testid="stSidebar"] .stButton button:active {
+    box-shadow: none !important;
+    outline: none !important;
+    transform: none !important;
+}
+
+/* Active nav highlight — marker wrapper + sibling selector */
+section[data-testid="stSidebar"] .stElementContainer:has(.nav-active-wrap) + .stElementContainer .stButton button {
     background: rgba(74, 144, 217, 0.15) !important;
-    border: 1px solid #4A90D9 !important;
-    border-radius: 0.5rem !important;
-    padding: 0.6rem 0.75rem !important;
-    color: inherit !important;
-    font-weight: 400 !important;
+    border-color: #4A90D9 !important;
+}
+section[data-testid="stSidebar"] .stElementContainer:has(.nav-active-wrap) + .stElementContainer .stButton button:hover {
+    background: rgba(74, 144, 217, 0.25) !important;
+}
+
+/* Marker wrapper: absolutely positioned, zero layout impact */
+section[data-testid="stSidebar"] .stElementContainer:has(.nav-active-wrap) {
+    position: absolute !important;
+    height: 0 !important;
+    width: 0 !important;
+    overflow: hidden !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    pointer-events: none !important;
+}
+
+/* Section header between nav groups */
+section[data-testid="stSidebar"] .stElementContainer:has(.nav-section-label) {
+    margin: 0 !important;
+    padding: 4px 0 2px 0 !important;
+    min-height: 0 !important;
 }
 </style>
 """, unsafe_allow_html=True)
 
 # Initialize nav state
 st.session_state.setdefault("nav_page", "Home")
+if st.session_state.get("nav_page") == "\u2B50  My Watchlist":
+    st.session_state["nav_page"] = "\u2B50  My Watchlists"
 
-# Home button above the "Begin Researching" label
-_home_selected = st.session_state["nav_page"] == "Home"
-if st.sidebar.button(
-    "🏠  Home", key="home_btn", width="stretch",
-    type="primary" if _home_selected else "secondary",
-):
-    st.session_state["nav_page"] = "Home"
-    st.rerun()
+def _nav_btn(label, key, nav_value, *, match_contains=False):
+    """Render a sidebar nav button. All secondary; active highlighted via CSS sibling."""
+    cur = st.session_state["nav_page"]
+    selected = (nav_value in cur) if match_contains else (cur == nav_value)
+    if selected:
+        st.sidebar.markdown('<div class="nav-active-wrap"></div>', unsafe_allow_html=True)
+    if st.sidebar.button(label, key=key, type="secondary", width="stretch"):
+        st.session_state["nav_page"] = nav_value
+        st.rerun()
+
+_nav_btn("🏠  Home", "home_btn", "Home")
+_nav_btn("\u2B50  My Watchlists", "wl_nav_btn", "\u2B50  My Watchlists",
+         match_contains=True)
+_nav_btn("\U0001F4DD  Research Notes", "notes_nav_btn", "\U0001F4DD  Research Notes",
+         match_contains=True)
 
 st.sidebar.markdown(
-    '<div style="font-size:0.85rem; font-weight:600; margin-bottom:0.4rem; '
+    '<div class="nav-section-label" style="font-size:0.85rem; font-weight:600; '
     'opacity:0.7;">Begin Researching Below</div>',
     unsafe_allow_html=True,
 )
 
-_nav_options = [
-    "\U0001F4C8  Company Financials",
-    "\u2716  Valuation Multiples",
-    "\u2B50  My Watchlist",
-    "\U0001F4DD  Research Notes",
-]
+_nav_btn("\U0001F4C8  Company Financials", "fin_nav_btn",
+         "\U0001F4C8  Company Financials", match_contains=True)
+_nav_btn("\u2716  Valuation Multiples", "val_nav_btn",
+         "\u2716  Valuation Multiples", match_contains=True)
 
-# If currently on Home, no radio option should appear selected — use None index
-_default_idx = None if st.session_state["nav_page"] == "Home" else 0
-for _i, _opt in enumerate(_nav_options):
-    if st.session_state["nav_page"] in _opt:
-        _default_idx = _i
-        break
-
-def _on_nav_change():
-    st.session_state["nav_page"] = st.session_state["_nav_radio"]
-
-page = st.sidebar.radio(
-    "Navigation",
-    _nav_options,
-    index=_default_idx,
-    label_visibility="collapsed",
-    key="_nav_radio",
-    on_change=_on_nav_change,
-)
-
-# If nav_page says Home, override radio selection
-if st.session_state["nav_page"] == "Home":
-    page = "Home"
+page = st.session_state["nav_page"]
 
 # ── Page: Home (Landing) ─────────────────────────────────────────
 
@@ -910,79 +1037,459 @@ if "Home" in page:
 # ── Page: Valuation Multiples ──────────────────────────────────────
 
 if "Valuation Multiples" in page:
-    st.title("Valuation Multiples")
+    st.markdown(
+        '<h2 style="text-align:center;margin-bottom:0.5rem;">Enter Tickers to Compare Below</h2>',
+        unsafe_allow_html=True,
+    )
     st.session_state.setdefault("comp_tickers", [])
+    st.session_state.setdefault("comp_group_name", None)
+    _at_limit = len(st.session_state["comp_tickers"]) >= 10
 
-    col_add_input, col_add_btn, col_add_spacer = st.columns([2, 1, 5])
-    with col_add_input:
-        new_ticker = _sanitize_ticker(st.text_input(
-            "Ticker", placeholder="Enter ticker symbol",
-            label_visibility="collapsed", key="comp_ticker_input",
-        ))
-    with col_add_btn:
-        if st.button("Add") and new_ticker and new_ticker not in st.session_state["comp_tickers"]:
-            st.session_state["comp_tickers"].append(new_ticker)
+    # ── Saved comparison groups ───────────────────────────────
+    _comp_groups = backend.get_comparison_groups(_user_id)
+    _group_options = ["— New —"] + [g["name"] for g in _comp_groups]
+    _cg1, _cg2, _cg3, _cg4 = st.columns([3, 1, 1, 1])
+    with _cg1:
+        _sel_group = st.selectbox(
+            "Saved Groups", _group_options,
+            index=0, label_visibility="collapsed", key="comp_group_sel",
+        )
+    with _cg2:
+        _load_clicked = st.button("Load", key="comp_load_btn",
+                                  disabled=(_sel_group == "— New —"))
+    with _cg3:
+        _save_clicked = st.button("Save", key="comp_save_btn",
+                                  disabled=(not st.session_state["comp_tickers"]))
+    with _cg4:
+        _delete_clicked = st.button("Delete", key="comp_delete_btn",
+                                    disabled=(_sel_group == "— New —"))
+
+    # Handle Load
+    if _load_clicked and _sel_group != "— New —":
+        _match = next((g for g in _comp_groups if g["name"] == _sel_group), None)
+        if _match:
+            st.session_state["comp_tickers"] = list(_match["tickers"])
+            st.session_state["comp_group_name"] = _match["name"]
             st.rerun()
 
+    # Handle Save
+    if _save_clicked and st.session_state["comp_tickers"]:
+        st.session_state["comp_saving"] = True
+
+    if st.session_state.get("comp_saving"):
+        _sv1, _sv2 = st.columns([3, 1])
+        with _sv1:
+            _save_name = st.text_input(
+                "Group name", value=st.session_state.get("comp_group_name") or "",
+                placeholder="Enter group name", label_visibility="collapsed",
+                key="comp_save_name_input",
+            )
+        with _sv2:
+            if st.button("Confirm Save", key="comp_confirm_save"):
+                if _save_name.strip():
+                    res = backend.save_comparison_group(
+                        _user_id, _save_name.strip(),
+                        st.session_state["comp_tickers"],
+                    )
+                    if res["success"]:
+                        st.session_state["comp_group_name"] = _save_name.strip()
+                        st.session_state["comp_saving"] = False
+                        st.rerun()
+                    else:
+                        st.error(res["error"])
+                else:
+                    st.warning("Please enter a group name.")
+
+    # Handle Delete
+    if _delete_clicked and _sel_group != "— New —":
+        _match = next((g for g in _comp_groups if g["name"] == _sel_group), None)
+        if _match:
+            backend.delete_comparison_group(_match["id"], _user_id)
+            if st.session_state.get("comp_group_name") == _sel_group:
+                st.session_state["comp_group_name"] = None
+            st.rerun()
+
+    col_add_input, col_add_spacer = st.columns([2, 6])
+    with col_add_input:
+        new_ticker = _sanitize_ticker(st.text_input(
+            "Ticker", placeholder="Enter Ticker",
+            label_visibility="collapsed", key="comp_ticker_input",
+        ))
+    if new_ticker and not _at_limit and new_ticker not in st.session_state["comp_tickers"]:
+        st.session_state["comp_tickers"].append(new_ticker)
+        st.rerun()
+
     if st.session_state["comp_tickers"]:
-        cols = st.columns(min(len(st.session_state["comp_tickers"]), 8))
+        cols = st.columns(min(len(st.session_state["comp_tickers"]), 10))
         for i, t in enumerate(st.session_state["comp_tickers"]):
             with cols[i % len(cols)]:
-                c1, c2 = st.columns([3, 1])
-                c1.markdown(f"**{t}**")
-                if c2.button("✕", key=f"rm_{t}"):
+                _clr = COMPARISON_COLORS[i % len(COMPARISON_COLORS)]
+                st.markdown(
+                    f'<div style="background:rgba(150,150,150,0.15);border:1px solid rgba(150,150,150,0.3);'
+                    f'border-radius:8px;padding:8px 10px;text-align:center;margin-bottom:4px;">'
+                    f'<span style="display:inline-block;width:10px;height:10px;border-radius:50%;'
+                    f'background:{_clr};margin-right:6px;vertical-align:middle;"></span>'
+                    f'<strong>{t}</strong></div>',
+                    unsafe_allow_html=True,
+                )
+                if st.button("✕", key=f"rm_{t}", use_container_width=True):
                     st.session_state["comp_tickers"].remove(t)
                     st.rerun()
+
+        # Fetch data for all tickers
+        comp_data = {}
+        with st.spinner("Fetching valuation data..."):
+            for _t in st.session_state["comp_tickers"]:
+                try:
+                    comp_data[_t] = fetch_info(_t)
+                except Exception:
+                    comp_data[_t] = None
+
+        # Define the 6 metrics to chart
+        _metrics = [
+            ("trailing_pe", "P/E (Trailing)"),
+            ("forward_pe", "Forward P/E"),
+            ("price_to_sales", "P/S"),
+            ("price_to_book", "P/B"),
+            ("ev_to_ebitda", "EV/EBITDA"),
+            ("debt_to_equity", "Debt to Equity %"),
+        ]
+        _tickers = st.session_state["comp_tickers"]
+        for _field, _chart_title in _metrics:
+            _vals = [comp_data.get(_t, {}).get(_field) if comp_data.get(_t) else None
+                     for _t in _tickers]
+            fig = _comparison_bar(_tickers, _vals, COMPARISON_COLORS, _chart_title)
+            _display_chart(fig, f"comp_{_field}")
+
+        # ── Summary grid: % difference from average & median ──
+        import statistics as _stats
+
+        def _pct_color(val_str):
+            """Return color-coded HTML cell for a % diff value."""
+            if val_str == "N/A":
+                return '<td style="text-align:center;padding:6px 10px;color:rgba(255,255,255,0.5);">N/A</td>'
+            pct = float(val_str.replace("%", "").replace("+", ""))
+            if pct < -5:
+                clr = "#2ecc71"  # green — well below avg
+            elif pct < 0:
+                clr = "#82e0aa"  # light green
+            elif pct < 5:
+                clr = "#f5b041"  # light orange
+            else:
+                clr = "#e74c3c"  # red — well above avg
+            return f'<td style="text-align:center;padding:6px 10px;color:{clr};font-weight:600;">{val_str}</td>'
+
+        # Build data: {metric: {ticker: {value, pct_avg, pct_med}}}
+        _grid_data = {}
+        for _field, _chart_title in _metrics:
+            _vals = [comp_data.get(_t, {}).get(_field) if comp_data.get(_t) else None
+                     for _t in _tickers]
+            _valid = [v for v in _vals if v is not None]
+            _avg = sum(_valid) / len(_valid) if _valid else None
+            _med = _stats.median(_valid) if _valid else None
+            _grid_data[_chart_title] = {}
+            for i, _t in enumerate(_tickers):
+                v = _vals[i]
+                pct_avg = ((v - _avg) / abs(_avg) * 100) if (v is not None and _avg and _avg != 0) else None
+                pct_med = ((v - _med) / abs(_med) * 100) if (v is not None and _med and _med != 0) else None
+                _grid_data[_chart_title][_t] = {
+                    "value": f"{v:.2f}" if v is not None else "N/A",
+                    "pct_avg": f"{pct_avg:+.1f}%" if pct_avg is not None else "N/A",
+                    "pct_med": f"{pct_med:+.1f}%" if pct_med is not None else "N/A",
+                }
+
+        if _grid_data:
+            _col_order = [m[1] for m in _metrics]
+            _tbl_style = (
+                'style="width:100%;border-collapse:collapse;margin-bottom:0.5rem;"'
+            )
+            _th_style = 'style="text-align:center;padding:6px 10px;border-bottom:1px solid rgba(255,255,255,0.15);font-size:0.8rem;opacity:0.7;"'
+            _tk_style = 'style="padding:6px 10px;font-weight:700;white-space:nowrap;"'
+
+            def _build_table(label, key):
+                header = f"<tr><th {_th_style}>Ticker</th>"
+                for m in _col_order:
+                    header += f"<th {_th_style}>{_esc(m)}</th>"
+                header += "</tr>"
+                rows_html = ""
+                for _t in _tickers:
+                    rows_html += f"<tr><td {_tk_style}>{_esc(_t)}</td>"
+                    for m in _col_order:
+                        val = _grid_data[m][_t][key]
+                        if key == "value":
+                            rows_html += f'<td style="text-align:center;padding:6px 10px;">{val}</td>'
+                        else:
+                            rows_html += _pct_color(val)
+                    rows_html += "</tr>"
+                return f"<table {_tbl_style}>{header}{rows_html}</table>"
+
+            st.markdown("---")
+            st.markdown("#### Comparison Summary")
+            st.markdown("**Values**")
+            st.markdown(_build_table("Values", "value"), unsafe_allow_html=True)
+            st.markdown("**% Difference from Average**")
+            st.markdown(_build_table("% Diff from Avg", "pct_avg"), unsafe_allow_html=True)
+            st.markdown("**% Difference from Median**")
+            st.markdown(_build_table("% Diff from Median", "pct_med"), unsafe_allow_html=True)
     else:
         st.info("Add tickers above to compare valuation multiples.")
 
     st.stop()
 
-# ── Page: My Watchlist ─────────────────────────────────────────────
+# ── Page: My Watchlists ────────────────────────────────────────────
 
-if "My Watchlist" in page:
-    st.title("My Watchlist")
+if "My Watchlists" in page:
+    st.title("My Watchlists")
 
-    wl_col_input, wl_col_btn, wl_col_spacer = st.columns([2, 1, 5])
-    with wl_col_input:
-        wl_ticker = _sanitize_ticker(st.text_input(
-            "Ticker", placeholder="Enter ticker symbol",
-            label_visibility="collapsed", key="wl_ticker_input",
-        ))
-    with wl_col_btn:
-        if st.button("Add", key="wl_add_btn") and wl_ticker:
-            res = backend.add_to_watchlist(_user_id, wl_ticker)
-            if res["success"]:
-                backend.log_activity(_user_id, "add_watchlist", ticker=wl_ticker)
+    # ── Ensure all 3 groups exist ─────────────────────────────
+    _all_groups = backend.ensure_default_group(_user_id)
+    _groups_err = None
+    if isinstance(_all_groups, tuple):
+        _all_groups, _groups_err = _all_groups
+
+    if not _all_groups or len(_all_groups) < 3:
+        st.warning(
+            "Could not load watchlist groups. Please check your connection "
+            "or contact an administrator."
+        )
+        if _groups_err:
+            st.code(_groups_err, language="text")
+        st.stop()
+
+    # Clamp index
+    _wl_idx = st.session_state.get("wl_active_group_idx")
+    if not isinstance(_wl_idx, int) or _wl_idx >= len(_all_groups):
+        st.session_state["wl_active_group_idx"] = 0
+
+    # ── Watchlist page CSS ───────────────────────────────────
+    st.markdown("""
+    <style>
+    /* Center radio button labels within the groups box */
+    [data-testid="stRadio"] > div[role="radiogroup"] {
+        justify-content: center;
+    }
+    /* Vertically center items in watchlist table rows */
+    [data-testid="stHorizontalBlock"] {
+        align-items: center !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+    _active_group = _all_groups[st.session_state["wl_active_group_idx"]]
+    st.session_state["_wl_active_group_id"] = _active_group["id"]
+
+    # ── Pre-fetch all watchlist data (quotes + MAs) ───────────
+    watchlist = backend.fetch_watchlist_cached(
+        _user_id, _active_group["id"], st.session_state["wl_cache_v"])
+    _wl_data = {}
+    for _item in (watchlist or []):
+        _t = _item["ticker"]
+        try:
+            _q = fetch_quote(_t)
+        except Exception:
+            _q = {}
+        _p = _q.get("price")
+        _ma50 = fetch_ma(_t, 50)
+        _ma100 = fetch_ma(_t, 100)
+        _ma200 = fetch_ma(_t, 200)
+        _pct = lambda p, ma: ((p - ma) / ma * 100) if p and ma and ma != 0 else None
+        _wl_data[_t] = {
+            "price": _p,
+            "change_pct": _q.get("change_pct"),
+            "ma50": _ma50, "pct50": _pct(_p, _ma50),
+            "ma100": _ma100, "pct100": _pct(_p, _ma100),
+            "ma200": _ma200, "pct200": _pct(_p, _ma200),
+        }
+
+    # ── Top layout: groups (left) + Dip Finder chart (right) ─
+    _top_left, _top_right = st.columns([1, 1])
+
+    with _top_left:
+        with st.container(border=True):
+            _group_names = ["Group 1", "Group 2", "Group 3"]
+            _sel_group = st.radio(
+                "Watchlist Groups",
+                options=_group_names,
+                index=st.session_state["wl_active_group_idx"],
+                horizontal=True,
+                key="wl_group_radio",
+            )
+            _new_idx = _group_names.index(_sel_group)
+            if _new_idx != st.session_state["wl_active_group_idx"]:
+                st.session_state["wl_active_group_idx"] = _new_idx
                 st.rerun()
-            else:
-                st.error(res["error"])
+
+
+    with _top_right:
+        # ── Dip Finder bar chart ──────────────────────────────
+        _ma_options = [50, 100, 200]
+        _dip_ma = st.radio(
+            "Moving Average Period",
+            options=_ma_options,
+            index=_ma_options.index(st.session_state.get("wl_dip_ma", 200)),
+            format_func=lambda x: f"{x}-Day",
+            horizontal=True,
+            key="wl_dip_ma_radio",
+        )
+        if _dip_ma != st.session_state.get("wl_dip_ma", 200):
+            st.session_state["wl_dip_ma"] = _dip_ma
+            st.rerun()
+        _pct_key = f"pct{_dip_ma}"
+
+        _chart_pairs = sorted(
+            [(t, _wl_data[t][_pct_key]) for t in _wl_data
+             if _wl_data[t][_pct_key] is not None],
+            key=lambda x: x[1],
+        )
+        _chart_tickers = [p[0] for p in _chart_pairs]
+        _chart_pcts = [p[1] for p in _chart_pairs]
+        if _chart_tickers:
+            _bar_colors = ["#27ae60" if p >= 0 else "#e74c3c" for p in _chart_pcts]
+            _dip_fig = go.Figure(go.Bar(
+                x=_chart_tickers,
+                y=_chart_pcts,
+                marker_color=_bar_colors,
+                text=[f"{p:+.1f}%" for p in _chart_pcts],
+                textposition="outside",
+            ))
+            _dip_fig.update_layout(
+                title=dict(
+                    text=f"Dip Finder \u2014 {_dip_ma}-Day Moving Average",
+                    x=0, xanchor="left", font=dict(size=16)),
+                yaxis_title=f"% from {_dip_ma}-Day MA",
+                xaxis_title=None,
+                plot_bgcolor="rgba(0,0,0,0)",
+                paper_bgcolor="rgba(0,0,0,0)",
+                margin=dict(l=40, r=20, t=50, b=50),
+                height=420,
+                yaxis=dict(zeroline=True, zerolinecolor="#888", zerolinewidth=1,
+                           gridcolor="rgba(128,128,128,0.2)"),
+                xaxis=dict(showgrid=False),
+            )
+            st.plotly_chart(_dip_fig, use_container_width=True, config=CHART_CFG)
+        else:
+            st.markdown(
+                '<div style="text-align:center; color:#888; padding:4rem 1rem;">'
+                'Add tickers to see the Dip Finder chart</div>',
+                unsafe_allow_html=True,
+            )
+
+    # ── Add ticker (Enter to submit) ──────────────────────────
+    def _handle_add_ticker():
+        raw = st.session_state.get("wl_ticker_input", "")
+        ticker = _sanitize_ticker(raw)
+        if ticker:
+            uid = st.session_state["user"]["id"]
+            gid = st.session_state.get("_wl_active_group_id")
+            if uid and gid:
+                res = backend.add_to_watchlist(uid, ticker, gid)
+                if res["success"]:
+                    backend.log_activity(uid, "add_watchlist", ticker=ticker)
+                    backend.invalidate_watchlist_cache()
+        st.session_state["wl_ticker_input"] = ""
+
+    _fc1, _fc2 = st.columns([2, 6])
+    with _fc1:
+        st.text_input(
+            "Ticker", placeholder="Enter Ticker",
+            label_visibility="collapsed", key="wl_ticker_input",
+            on_change=_handle_add_ticker,
+        )
 
     st.divider()
 
-    watchlist = backend.fetch_watchlist_cached(_user_id, st.session_state["wl_cache_v"])
-
+    # ── Rich data table ───────────────────────────────────────
+    _TBL_COLS = [1.4, 1.8, 1.2, 1, 1.2, 1, 1.2, 1, 0.6]
     if watchlist:
+        # Header row
+        (_hTkr, _hPrc, _h50, _h50p, _h100, _h100p,
+         _h200, _h200p, _hRm) = st.columns(_TBL_COLS)
+        _ctr = lambda t: f'<div style="text-align:center;"><b>{t}</b></div>'
+        _hTkr.markdown(_ctr("Ticker"), unsafe_allow_html=True)
+        _hPrc.markdown(_ctr("Price"), unsafe_allow_html=True)
+        _h50.markdown(_ctr("50-MA"), unsafe_allow_html=True)
+        _h50p.markdown(_ctr("% 50"), unsafe_allow_html=True)
+        _h100.markdown(_ctr("100-MA"), unsafe_allow_html=True)
+        _h100p.markdown(_ctr("% 100"), unsafe_allow_html=True)
+        _h200.markdown(_ctr("200-MA"), unsafe_allow_html=True)
+        _h200p.markdown(_ctr("% 200"), unsafe_allow_html=True)
+
+        def _ma_cell(col, val):
+            col.markdown(
+                f'<div style="text-align:center;">'
+                f'{"${:.2f}".format(val) if val is not None else "N/A"}'
+                f'</div>', unsafe_allow_html=True)
+
+        def _pct_cell(col, val):
+            if val is not None:
+                _c = "#27ae60" if val >= 0 else "#e74c3c"
+                _s = "+" if val >= 0 else ""
+                col.markdown(
+                    f'<div style="text-align:center;">'
+                    f'<span style="color:{_c}; font-weight:600;">'
+                    f'{_s}{val:.2f}%</span></div>', unsafe_allow_html=True)
+            else:
+                col.markdown(
+                    '<div style="text-align:center;">N/A</div>',
+                    unsafe_allow_html=True)
+
         for item in watchlist:
-            _wc1, _wc2, _wc3, _wc4 = st.columns([2, 4, 1, 1])
-            with _wc1:
-                st.markdown(f"**{item['ticker']}**")
-            with _wc2:
-                added = item.get("added_at", "")[:10] if item.get("added_at") else ""
-                note_text = f" — {item['notes']}" if item.get("notes") else ""
-                st.caption(f"Added {added}{note_text}")
-            with _wc3:
-                if st.button("View", key=f"wl_view_{item['ticker']}"):
-                    st.session_state["active_ticker"] = item["ticker"]
+            _t = item["ticker"]
+            _d = _wl_data.get(_t, {})
+            _p = _d.get("price")
+            _chg_pct = _d.get("change_pct")
+
+            (_c1, _c2, _c3, _c4, _c5, _c6,
+             _c7, _c8, _c9) = st.columns(_TBL_COLS)
+            # Ticker — clickable link to Company Financials
+            with _c1:
+                if st.button(
+                    _t, key=f"wl_view_{_t}_{_active_group['id']}",
+                    use_container_width=True, type="secondary",
+                ):
+                    st.session_state["active_ticker"] = _t
                     st.session_state["nav_page"] = "\U0001F4C8  Company Financials"
                     st.rerun()
-            with _wc4:
-                if st.button("Remove", key=f"wl_rm_{item['ticker']}"):
-                    backend.remove_from_watchlist(_user_id, item["ticker"])
-                    backend.log_activity(_user_id, "remove_watchlist", ticker=item["ticker"])
+            # Price + daily %
+            if _p is not None:
+                _price_str = f"${_p:.2f}"
+                if _chg_pct is not None:
+                    _chg_color = "#27ae60" if _chg_pct >= 0 else "#e74c3c"
+                    _chg_sign = "+" if _chg_pct >= 0 else ""
+                    _price_str += (
+                        f' <span style="color:{_chg_color}; font-size:0.85em;">'
+                        f'({_chg_sign}{_chg_pct:.2f}%)</span>')
+                _c2.markdown(
+                    f'<div style="text-align:center;">{_price_str}</div>',
+                    unsafe_allow_html=True)
+            else:
+                _c2.markdown(
+                    '<div style="text-align:center;">N/A</div>',
+                    unsafe_allow_html=True)
+            # 50-Day MA + %
+            _ma_cell(_c3, _d.get("ma50"))
+            _pct_cell(_c4, _d.get("pct50"))
+            # 100-Day MA + %
+            _ma_cell(_c5, _d.get("ma100"))
+            _pct_cell(_c6, _d.get("pct100"))
+            # 200-Day MA + %
+            _ma_cell(_c7, _d.get("ma200"))
+            _pct_cell(_c8, _d.get("pct200"))
+            # Remove
+            with _c9:
+                if st.button("\u2715", key=f"wl_rm_{_t}_{_active_group['id']}",
+                             use_container_width=True):
+                    backend.remove_from_watchlist(_user_id, _t, _active_group["id"])
+                    backend.log_activity(_user_id, "remove_watchlist", ticker=_t)
                     st.rerun()
     else:
-        st.info("Your watchlist is empty. Add tickers above to start tracking.")
+        st.info("This group is empty. Add tickers above to start tracking.")
+
+    # ── Limits caption ────────────────────────────────────────
+    st.caption(
+        f"{len(watchlist) if watchlist else 0}/{backend.MAX_STOCKS_PER_GROUP} "
+        f"stocks in this group"
+    )
 
     st.stop()
 
@@ -1238,17 +1745,42 @@ else:
     mc_str = "N/A"
 c3.metric("Market Cap", mc_str)
 
-# Inline watchlist toggle
-_in_wl = backend.is_in_watchlist(_user_id, ticker)
-_wl_label = "Remove from Watchlist" if _in_wl else "Add to Watchlist"
-if st.button(_wl_label, key="cf_wl_toggle"):
-    if _in_wl:
-        backend.remove_from_watchlist(_user_id, ticker)
-        backend.log_activity(_user_id, "remove_watchlist", ticker=ticker)
-    else:
-        backend.add_to_watchlist(_user_id, ticker)
-        backend.log_activity(_user_id, "add_watchlist", ticker=ticker)
-    st.rerun()
+# Inline watchlist group toggle
+_cf_groups = backend.get_watchlist_groups(_user_id)
+if not _cf_groups:
+    backend.ensure_default_group(_user_id)
+    _cf_groups = backend.get_watchlist_groups(_user_id)
+_cf_ticker_groups = backend.get_ticker_groups(_user_id, ticker)
+_cf_group_map = {g["id"]: g["name"] for g in _cf_groups}
+
+if _cf_ticker_groups:
+    # Show remove button for each group containing this ticker
+    for _gid in _cf_ticker_groups:
+        _gname = _cf_group_map.get(_gid, "Unknown")
+        if st.button(f"Remove from {_gname}", key=f"cf_wl_rm_{_gid}"):
+            backend.remove_from_watchlist(_user_id, ticker, _gid)
+            backend.log_activity(_user_id, "remove_watchlist", ticker=ticker)
+            st.rerun()
+
+# Show add-to-group picker for groups that don't contain this ticker
+_cf_available = [g for g in _cf_groups if g["id"] not in _cf_ticker_groups]
+if _cf_available:
+    _cfa1, _cfa2 = st.columns([2, 1])
+    with _cfa1:
+        _cf_sel = st.selectbox(
+            "Add to group", range(len(_cf_available)),
+            format_func=lambda i: _cf_available[i]["name"],
+            label_visibility="collapsed", key="cf_wl_group_sel",
+        )
+    with _cfa2:
+        if st.button("Add to Watchlist", key="cf_wl_add"):
+            res = backend.add_to_watchlist(
+                _user_id, ticker, _cf_available[_cf_sel]["id"])
+            if res["success"]:
+                backend.log_activity(_user_id, "add_watchlist", ticker=ticker)
+                st.rerun()
+            else:
+                st.error(res["error"])
 
 # ── Price History ───────────────────────────────────────────────────
 

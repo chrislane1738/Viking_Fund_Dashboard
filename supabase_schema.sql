@@ -154,3 +154,105 @@ CREATE TRIGGER set_profiles_updated_at
 CREATE TRIGGER set_research_notes_updated_at
     BEFORE UPDATE ON public.research_notes
     FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+-- ============================================================
+-- MIGRATION: Watchlist Groups (run after initial schema)
+-- ============================================================
+
+-- ── 7. Watchlist Groups ───────────────────────────────────────
+CREATE TABLE public.watchlist_groups (
+    id        UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id   UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+    name      TEXT NOT NULL DEFAULT 'General',
+    position  SMALLINT NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE(user_id, name),
+    UNIQUE(user_id, position),
+    CONSTRAINT position_range CHECK (position >= 0 AND position <= 2)
+);
+
+ALTER TABLE public.watchlist_groups ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Users can view own groups"
+    ON public.watchlist_groups FOR SELECT
+    USING (auth.uid() = user_id);
+
+CREATE POLICY "Users can insert own groups"
+    ON public.watchlist_groups FOR INSERT
+    WITH CHECK (auth.uid() = user_id);
+
+CREATE POLICY "Users can update own groups"
+    ON public.watchlist_groups FOR UPDATE
+    USING (auth.uid() = user_id);
+
+CREATE POLICY "Users can delete own groups"
+    ON public.watchlist_groups FOR DELETE
+    USING (auth.uid() = user_id);
+
+CREATE INDEX idx_watchlist_groups_user_id ON public.watchlist_groups(user_id);
+
+-- ── 8. Migrate watchlists to use groups ───────────────────────
+
+-- 8a. Add nullable group_id column
+ALTER TABLE public.watchlists
+    ADD COLUMN group_id UUID REFERENCES public.watchlist_groups(id) ON DELETE CASCADE;
+
+-- 8b. Create a "General" group (position 0) for each user with existing watchlist entries
+INSERT INTO public.watchlist_groups (user_id, name, position)
+SELECT DISTINCT user_id, 'General', 0
+FROM public.watchlists
+ON CONFLICT DO NOTHING;
+
+-- 8c. Backfill existing watchlist rows with their user's "General" group
+UPDATE public.watchlists w
+SET group_id = g.id
+FROM public.watchlist_groups g
+WHERE g.user_id = w.user_id
+  AND g.name = 'General'
+  AND w.group_id IS NULL;
+
+-- 8d. Make group_id NOT NULL
+ALTER TABLE public.watchlists
+    ALTER COLUMN group_id SET NOT NULL;
+
+-- 8e. Drop old unique constraint, add new one scoped to group
+ALTER TABLE public.watchlists
+    DROP CONSTRAINT watchlists_user_id_ticker_key;
+
+ALTER TABLE public.watchlists
+    ADD CONSTRAINT watchlists_group_id_ticker_key UNIQUE(group_id, ticker);
+
+-- 8f. Index on group_id
+CREATE INDEX idx_watchlists_group_id ON public.watchlists(group_id);
+
+-- ============================================================
+-- 9. Comparison Groups (valuation multiples saved sets)
+-- ============================================================
+CREATE TABLE public.comparison_groups (
+    id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id    UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+    name       TEXT NOT NULL,
+    tickers    TEXT[] NOT NULL DEFAULT '{}',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE(user_id, name)
+);
+
+ALTER TABLE public.comparison_groups ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Users can view own comparison groups"
+    ON public.comparison_groups FOR SELECT
+    USING (auth.uid() = user_id);
+
+CREATE POLICY "Users can insert own comparison groups"
+    ON public.comparison_groups FOR INSERT
+    WITH CHECK (auth.uid() = user_id);
+
+CREATE POLICY "Users can update own comparison groups"
+    ON public.comparison_groups FOR UPDATE
+    USING (auth.uid() = user_id);
+
+CREATE POLICY "Users can delete own comparison groups"
+    ON public.comparison_groups FOR DELETE
+    USING (auth.uid() = user_id);
+
+CREATE INDEX idx_comparison_groups_user_id ON public.comparison_groups(user_id);
