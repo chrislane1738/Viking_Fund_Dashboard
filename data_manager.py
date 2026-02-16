@@ -64,6 +64,10 @@ class DataProvider(ABC):
     def get_price_history(self, ticker: str, period: str = "3y") -> pd.DataFrame:
         """Return historical price data (Date, Open, High, Low, Close, Volume)."""
 
+    def get_quote(self, ticker: str) -> dict:
+        """Return real-time quote data (price, change, open, previous close)."""
+        return {}
+
 
 # ── Constants ───────────────────────────────────────────────────────
 
@@ -408,7 +412,7 @@ class FMPProvider(DataProvider):
             return self._ttm_metrics(ticker)
 
         period = "quarter" if mode == "quarterly" else "annual"
-        limit = 20 if mode == "quarterly" else 20
+        limit = 80 if mode == "quarterly" else 20
 
         inc = _fmp_get("income-statement", {"symbol": ticker, "period": period, "limit": limit})
         bs = _fmp_get("balance-sheet-statement", {"symbol": ticker, "period": period, "limit": limit})
@@ -555,9 +559,9 @@ class FMPProvider(DataProvider):
 
     def _ttm_metrics(self, ticker: str) -> pd.DataFrame:
         """Compute trailing-twelve-month metrics from quarterly data."""
-        inc = _fmp_get("income-statement", {"symbol": ticker, "period": "quarter", "limit": 20})
-        bs = _fmp_get("balance-sheet-statement", {"symbol": ticker, "period": "quarter", "limit": 20})
-        cf = _fmp_get("cash-flow-statement", {"symbol": ticker, "period": "quarter", "limit": 20})
+        inc = _fmp_get("income-statement", {"symbol": ticker, "period": "quarter", "limit": 83})
+        bs = _fmp_get("balance-sheet-statement", {"symbol": ticker, "period": "quarter", "limit": 83})
+        cf = _fmp_get("cash-flow-statement", {"symbol": ticker, "period": "quarter", "limit": 83})
 
         if not inc or len(inc) < 4:
             return pd.DataFrame()
@@ -916,6 +920,17 @@ class FMPProvider(DataProvider):
         df = df.rename(columns=col_map)
 
         return df[["Open", "High", "Low", "Close", "Volume"]]
+
+    def get_quote(self, ticker: str) -> dict:
+        data = _fmp_get("quote", {"symbol": ticker})
+        q = data[0] if isinstance(data, list) and data else (data if isinstance(data, dict) else {})
+        return {
+            "price": q.get("price"),
+            "change": q.get("change"),
+            "change_pct": q.get("changesPercentage"),
+            "open": q.get("open"),
+            "previous_close": q.get("previousClose"),
+        }
 
 
 # ── yfinance implementation (kept as fallback) ─────────────────────

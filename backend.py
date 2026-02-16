@@ -113,10 +113,16 @@ def get_profile(user_id: str) -> dict | None:
         return None
 
 
+_PROFILE_ALLOWED_FIELDS = {"first_name", "last_name", "student_id"}
+
+
 def update_profile(user_id: str, **fields) -> dict:
-    """Update profile fields. Returns {success, error}."""
+    """Update profile fields. Only whitelisted columns are accepted."""
+    safe_fields = {k: v for k, v in fields.items() if k in _PROFILE_ALLOWED_FIELDS}
+    if not safe_fields:
+        return {"success": False, "error": "No valid fields to update."}
     try:
-        _sb().table("profiles").update(fields).eq("id", user_id).execute()
+        _sb().table("profiles").update(safe_fields).eq("id", user_id).execute()
         return {"success": True, "error": None}
     except Exception as e:
         return {"success": False, "error": _friendly_error(str(e))}
