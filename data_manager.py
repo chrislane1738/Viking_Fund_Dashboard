@@ -5,6 +5,7 @@ The frontend calls generic methods on a DataProvider interface.
 Swap the concrete implementation (YFinanceProvider → FMPProvider)
 without touching any UI code.
 """
+from __future__ import annotations
 
 from abc import ABC, abstractmethod
 import os
