@@ -1172,8 +1172,11 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# Price + day change + overnight change
-_quote = fetch_quote(ticker)
+# Price + day change + after hours change
+try:
+    _quote = fetch_quote(ticker)
+except Exception:
+    _quote = {}
 _q_price = _quote.get("price")
 _q_change = _quote.get("change")
 _q_change_pct = _quote.get("change_pct")
