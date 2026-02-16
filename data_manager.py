@@ -1215,6 +1215,17 @@ if _HAS_YFINANCE:
             return self._ticker(ticker).history(period=period)
 
 
+# ── Earnings calendar (standalone, not tied to a provider) ──────────
+
+def fetch_earnings_calendar(from_date: str, to_date: str) -> list[dict]:
+    """Fetch upcoming earnings for a date range from FMP."""
+    try:
+        data = _fmp_get("earnings-calendar", {"from": from_date, "to": to_date})
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
 # ── Factory / default provider ──────────────────────────────────────
 
 def get_provider() -> DataProvider:

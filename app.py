@@ -6,8 +6,8 @@ import streamlit as st
 import plotly.graph_objects as go
 import base64
 from pathlib import Path
-from datetime import datetime
-from data_manager import get_provider, _format_statement_display
+from datetime import datetime, timedelta
+from data_manager import get_provider, _format_statement_display, fetch_earnings_calendar
 import backend
 
 
@@ -223,6 +223,10 @@ def fetch_ma(ticker, window=200):
 
 def fetch_200ma(ticker):
     return fetch_ma(ticker, 200)
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_upcoming_earnings(from_date: str, to_date: str) -> list:
+    return fetch_earnings_calendar(from_date, to_date)
 
 
 # ── Chart helpers ───────────────────────────────────────────────────
@@ -1373,6 +1377,50 @@ if "My Watchlists" in page:
                 'Add tickers to see the Dip Finder chart</div>',
                 unsafe_allow_html=True,
             )
+
+    # ── Upcoming Earnings ──────────────────────────────────────
+    if watchlist:
+        _today = datetime.now().strftime("%Y-%m-%d")
+        _future = (datetime.now() + timedelta(days=90)).strftime("%Y-%m-%d")
+        _all_earnings = fetch_upcoming_earnings(_today, _future)
+
+        _wl_set = {item["ticker"].upper() for item in watchlist}
+        _matched = sorted(
+            [e for e in _all_earnings if e.get("symbol", "").upper() in _wl_set],
+            key=lambda e: e.get("date", ""),
+        )
+
+        with st.container(border=True):
+            st.markdown("**Upcoming Earnings** (next 90 days)")
+            if _matched:
+                _eh, _ec1, _ec2, _ec3 = st.columns([1.2, 1.2, 1, 1.2])
+                _eh.markdown("**Ticker**")
+                _ec1.markdown("**Date**")
+                _ec2.markdown("**EPS Est.**")
+                _ec3.markdown("**Rev. Est.**")
+
+                for _e in _matched:
+                    _col1, _col2, _col3, _col4 = st.columns([1.2, 1.2, 1, 1.2])
+                    _col1.write(_e.get("symbol", ""))
+                    try:
+                        _dt = datetime.strptime(_e.get("date", ""), "%Y-%m-%d")
+                        _col2.write(_dt.strftime("%b %d, %Y"))
+                    except (ValueError, TypeError):
+                        _col2.write(_e.get("date", ""))
+                    _eps_est = _e.get("epsEstimated")
+                    _col3.write(f"${_eps_est:.2f}" if _eps_est is not None else "--")
+                    _rev_est = _e.get("revenueEstimated")
+                    if _rev_est is not None:
+                        if abs(_rev_est) >= 1e9:
+                            _col4.write(f"${_rev_est / 1e9:.1f}B")
+                        elif abs(_rev_est) >= 1e6:
+                            _col4.write(f"${_rev_est / 1e6:.0f}M")
+                        else:
+                            _col4.write(f"${_rev_est:,.0f}")
+                    else:
+                        _col4.write("--")
+            else:
+                st.caption("No upcoming earnings in the next 90 days.")
 
     # ── Add ticker (Enter to submit) ──────────────────────────
     def _handle_add_ticker():
