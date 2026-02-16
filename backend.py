@@ -63,6 +63,9 @@ def sign_in(email: str, password: str) -> dict:
     try:
         res = _sb().auth.sign_in_with_password({"email": email, "password": password})
         if res.user and res.session:
+            # Store tokens in per-user session state (not in the shared client)
+            st.session_state["_access_token"] = res.session.access_token
+            st.session_state["_refresh_token"] = res.session.refresh_token
             return {"success": True, "user": res.user, "session": res.session, "error": None}
         return {"success": False, "user": None, "session": None, "error": "Sign in failed."}
     except Exception as e:
@@ -78,16 +81,34 @@ def sign_out():
     for key in list(st.session_state.keys()):
         if key.startswith("user_") or key in (
             "authenticated", "user", "wl_cache_v", "notes_cache_v",
+            "_access_token", "_refresh_token",
         ):
             del st.session_state[key]
 
 
 def get_session():
-    """Return the current session if the JWT is still valid, else None."""
+    """Return the current session if the user's JWT is still valid, else None.
+
+    Tokens are stored per-user in st.session_state — NOT in the shared
+    Supabase client — so one user's login can never leak to another.
+    """
+    access = st.session_state.get("_access_token")
+    refresh = st.session_state.get("_refresh_token")
+    if not access or not refresh:
+        return None
     try:
-        res = _sb().auth.get_session()
-        return res if res else None
+        res = _sb().auth.set_session(access, refresh)
+        if res and res.user:
+            # Persist refreshed tokens
+            if res.session:
+                st.session_state["_access_token"] = res.session.access_token
+                st.session_state["_refresh_token"] = res.session.refresh_token
+            return res
+        return None
     except Exception:
+        # Token expired or invalid — clear stale tokens
+        st.session_state.pop("_access_token", None)
+        st.session_state.pop("_refresh_token", None)
         return None
 
 
