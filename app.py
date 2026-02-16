@@ -6,6 +6,7 @@ import base64
 from pathlib import Path
 from datetime import datetime
 from data_manager import get_provider, _format_statement_display
+import backend
 
 st.set_page_config(page_title="Viking Fund Dashboard", layout="wide")
 
@@ -38,6 +39,109 @@ div[data-testid="stButton"] button[kind="secondary"] {
 """, unsafe_allow_html=True)
 
 provider = get_provider()
+
+# ── Auth gate ────────────────────────────────────────────────────────
+
+# Encode logo early (used by auth page and sidebar)
+_logo_path = Path(__file__).parent / "assets" / "logos" / "vfc_logo_transparent (3).png"
+_logo_b64 = ""
+if _logo_path.exists():
+    _logo_b64 = base64.b64encode(_logo_path.read_bytes()).decode()
+
+st.session_state.setdefault("authenticated", False)
+st.session_state.setdefault("user", None)
+st.session_state.setdefault("wl_cache_v", 0)
+st.session_state.setdefault("notes_cache_v", 0)
+
+
+def _render_auth_page():
+    """Full-screen login / signup form."""
+    st.markdown("<div style='height: 5vh;'></div>", unsafe_allow_html=True)
+    _al, _am, _ar = st.columns([1, 2, 1])
+    with _am:
+        if _logo_b64:
+            st.markdown(
+                f'<div style="text-align:center; margin-bottom:1rem;">'
+                f'<img src="data:image/png;base64,{_logo_b64}" style="width:220px;">'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+        st.markdown(
+            '<h3 style="text-align:center; margin-bottom:1.5rem;">Viking Fund Club Dashboard</h3>',
+            unsafe_allow_html=True,
+        )
+
+        tab_in, tab_up = st.tabs(["Sign In", "Sign Up"])
+
+        with tab_in:
+            email = st.text_input("Email", key="login_email")
+            password = st.text_input("Password", type="password", key="login_password")
+            if st.button("Sign In", use_container_width=True, type="primary"):
+                if not email or not password:
+                    st.error("Please enter both email and password.")
+                else:
+                    res = backend.sign_in(email, password)
+                    if res["success"]:
+                        st.session_state["authenticated"] = True
+                        user_obj = res["user"]
+                        profile = backend.get_profile(str(user_obj.id))
+                        st.session_state["user"] = {
+                            "id": str(user_obj.id),
+                            "email": user_obj.email,
+                            "first_name": profile.get("first_name", "") if profile else "",
+                            "last_name": profile.get("last_name", "") if profile else "",
+                            "student_id": profile.get("student_id", "") if profile else "",
+                        }
+                        backend.log_activity(str(user_obj.id), "login")
+                        st.rerun()
+                    else:
+                        st.error(res["error"])
+
+        with tab_up:
+            first = st.text_input("First Name", key="signup_first")
+            last = st.text_input("Last Name", key="signup_last")
+            sid = st.text_input("Student ID", key="signup_sid")
+            s_email = st.text_input("Email", key="signup_email")
+            s_pass = st.text_input("Password", type="password", key="signup_password")
+            s_pass2 = st.text_input("Confirm Password", type="password", key="signup_password2")
+            if st.button("Create Account", use_container_width=True, type="primary"):
+                if not all([first, last, sid, s_email, s_pass, s_pass2]):
+                    st.error("All fields are required.")
+                elif s_pass != s_pass2:
+                    st.error("Passwords do not match.")
+                elif len(s_pass) < 6:
+                    st.error("Password must be at least 6 characters.")
+                elif backend.check_student_id_exists(sid):
+                    st.error("This Student ID is already registered.")
+                else:
+                    res = backend.sign_up(s_email, s_pass, first, last, sid)
+                    if res["success"]:
+                        st.success("Account created! Please check your email to confirm, then sign in.")
+                    else:
+                        st.error(res["error"])
+
+
+# Check existing session
+if not st.session_state["authenticated"]:
+    session = backend.get_session()
+    if session:
+        user_obj = session.user
+        profile = backend.get_profile(str(user_obj.id))
+        st.session_state["authenticated"] = True
+        st.session_state["user"] = {
+            "id": str(user_obj.id),
+            "email": user_obj.email,
+            "first_name": profile.get("first_name", "") if profile else "",
+            "last_name": profile.get("last_name", "") if profile else "",
+            "student_id": profile.get("student_id", "") if profile else "",
+        }
+
+if not st.session_state["authenticated"]:
+    _render_auth_page()
+    st.stop()
+
+_current_user = st.session_state["user"]
+_user_id = _current_user["id"]
 
 # ── Cached data fetchers ────────────────────────────────────────────
 
@@ -486,13 +590,7 @@ def _line(series, title, prefix="$"):
 
 # ── Sidebar ─────────────────────────────────────────────────────────
 
-# Encode local logo as base64 for sidebar display
-_logo_path = Path(__file__).parent / "assets" / "logos" / "vfc_logo_transparent (3).png"
-_logo_b64 = ""
-if _logo_path.exists():
-    _logo_b64 = base64.b64encode(_logo_path.read_bytes()).decode()
-
-# Sidebar logo
+# Sidebar logo (already loaded above)
 if _logo_b64:
     st.sidebar.markdown(
         f'<div style="text-align:center; margin-bottom:0.5rem; padding:0 4px;">'
@@ -503,9 +601,21 @@ if _logo_b64:
 
 st.sidebar.markdown(
     '<div style="text-align:center; font-size:1.1rem; font-weight:700; '
-    'line-height:1.3; margin-bottom:1rem;">The Official VFC<br>Research Dashboard</div>',
+    'line-height:1.3; margin-bottom:0.5rem;">The Official VFC<br>Research Dashboard</div>',
     unsafe_allow_html=True,
 )
+
+st.sidebar.markdown(
+    f'<div style="text-align:center; font-size:0.9rem; opacity:0.8; margin-bottom:0.5rem;">'
+    f'Welcome, {_current_user["first_name"]}</div>',
+    unsafe_allow_html=True,
+)
+
+if st.sidebar.button("Logout", use_container_width=True, key="logout_btn"):
+    backend.sign_out()
+    st.rerun()
+
+st.sidebar.divider()
 
 # Custom CSS for sidebar radio → selectable boxes with icons
 st.markdown("""
@@ -582,6 +692,8 @@ st.sidebar.markdown(
 _nav_options = [
     "\U0001F4C8  Company Financials",
     "\u2716  Valuation Multiples",
+    "\u2B50  My Watchlist",
+    "\U0001F4DD  Research Notes",
 ]
 
 # If currently on Home, no radio option should appear selected — use None index
@@ -699,6 +811,185 @@ if "Valuation Multiples" in page:
 
     st.stop()
 
+# ── Page: My Watchlist ─────────────────────────────────────────────
+
+if "My Watchlist" in page:
+    st.title("My Watchlist")
+
+    wl_col_input, wl_col_btn, wl_col_spacer = st.columns([2, 1, 5])
+    with wl_col_input:
+        wl_ticker = st.text_input(
+            "Ticker", placeholder="Enter ticker symbol",
+            label_visibility="collapsed", key="wl_ticker_input",
+        ).upper().strip()
+    with wl_col_btn:
+        if st.button("Add", key="wl_add_btn") and wl_ticker:
+            res = backend.add_to_watchlist(_user_id, wl_ticker)
+            if res["success"]:
+                backend.log_activity(_user_id, "add_watchlist", ticker=wl_ticker)
+                st.rerun()
+            else:
+                st.error(res["error"])
+
+    st.divider()
+
+    watchlist = backend.fetch_watchlist_cached(_user_id, st.session_state["wl_cache_v"])
+
+    if watchlist:
+        for item in watchlist:
+            _wc1, _wc2, _wc3, _wc4 = st.columns([2, 4, 1, 1])
+            with _wc1:
+                st.markdown(f"**{item['ticker']}**")
+            with _wc2:
+                added = item.get("added_at", "")[:10] if item.get("added_at") else ""
+                note_text = f" — {item['notes']}" if item.get("notes") else ""
+                st.caption(f"Added {added}{note_text}")
+            with _wc3:
+                if st.button("View", key=f"wl_view_{item['ticker']}"):
+                    st.session_state["active_ticker"] = item["ticker"]
+                    st.session_state["nav_page"] = "\U0001F4C8  Company Financials"
+                    st.rerun()
+            with _wc4:
+                if st.button("Remove", key=f"wl_rm_{item['ticker']}"):
+                    backend.remove_from_watchlist(_user_id, item["ticker"])
+                    backend.log_activity(_user_id, "remove_watchlist", ticker=item["ticker"])
+                    st.rerun()
+    else:
+        st.info("Your watchlist is empty. Add tickers above to start tracking.")
+
+    st.stop()
+
+# ── Page: Research Notes ───────────────────────────────────────────
+
+if "Research Notes" in page:
+    st.title("Research Notes")
+
+    rn_col_filter, rn_col_btn, rn_col_spacer = st.columns([2, 1, 5])
+    with rn_col_filter:
+        rn_filter = st.text_input(
+            "Filter by ticker", placeholder="Filter by ticker (optional)",
+            label_visibility="collapsed", key="rn_filter_input",
+        ).upper().strip() or None
+    with rn_col_btn:
+        if st.button("New Note", key="rn_new_btn"):
+            st.session_state["rn_editing"] = True
+            st.session_state["rn_edit_id"] = None
+
+    # Note editor
+    st.session_state.setdefault("rn_editing", False)
+    st.session_state.setdefault("rn_edit_id", None)
+
+    if st.session_state["rn_editing"]:
+        with st.expander("Note Editor", expanded=True):
+            # Pre-fill if editing existing note
+            edit_id = st.session_state["rn_edit_id"]
+            defaults = {"ticker": rn_filter or "", "title": "", "content": "", "sentiment": "Neutral"}
+            if edit_id:
+                existing = backend.get_notes(_user_id)
+                match = [n for n in existing if n["id"] == edit_id]
+                if match:
+                    n = match[0]
+                    defaults["ticker"] = n.get("ticker", "")
+                    defaults["title"] = n.get("title", "")
+                    defaults["content"] = n.get("content", "")
+                    if n.get("is_bullish") is True:
+                        defaults["sentiment"] = "Bullish"
+                    elif n.get("is_bullish") is False:
+                        defaults["sentiment"] = "Bearish"
+                    else:
+                        defaults["sentiment"] = "Neutral"
+
+            ne_ticker = st.text_input("Ticker", value=defaults["ticker"], key="ne_ticker")
+            ne_title = st.text_input("Title", value=defaults["title"], key="ne_title")
+            ne_content = st.text_area("Content (Markdown supported)", value=defaults["content"],
+                                      height=200, key="ne_content")
+            ne_sentiment = st.radio("Sentiment", ["Neutral", "Bullish", "Bearish"],
+                                    horizontal=True, key="ne_sentiment",
+                                    index=["Neutral", "Bullish", "Bearish"].index(defaults["sentiment"]))
+
+            ne_c1, ne_c2, _ = st.columns([1, 1, 4])
+            with ne_c1:
+                if st.button("Save", type="primary", key="ne_save"):
+                    if not ne_ticker or not ne_title:
+                        st.error("Ticker and Title are required.")
+                    else:
+                        is_bullish = True if ne_sentiment == "Bullish" else (
+                            False if ne_sentiment == "Bearish" else None)
+                        if edit_id:
+                            res = backend.update_note(
+                                edit_id, _user_id,
+                                ticker=ne_ticker.upper(), title=ne_title,
+                                content=ne_content, is_bullish=is_bullish,
+                            )
+                            if res["success"]:
+                                backend.log_activity(_user_id, "update_note", ticker=ne_ticker.upper())
+                                st.session_state["rn_editing"] = False
+                                st.session_state["rn_edit_id"] = None
+                                st.rerun()
+                            else:
+                                st.error(res["error"])
+                        else:
+                            res = backend.create_note(
+                                _user_id, ne_ticker, ne_title, ne_content,
+                                is_bullish=is_bullish,
+                            )
+                            if res["success"]:
+                                backend.log_activity(_user_id, "create_note", ticker=ne_ticker.upper())
+                                st.session_state["rn_editing"] = False
+                                st.session_state["rn_edit_id"] = None
+                                st.rerun()
+                            else:
+                                st.error(res["error"])
+            with ne_c2:
+                if st.button("Cancel", key="ne_cancel"):
+                    st.session_state["rn_editing"] = False
+                    st.session_state["rn_edit_id"] = None
+                    st.rerun()
+
+    st.divider()
+
+    notes = backend.fetch_notes_cached(_user_id, rn_filter, st.session_state["notes_cache_v"])
+
+    if notes:
+        for note in notes:
+            # Sentiment indicator
+            if note.get("is_bullish") is True:
+                indicator = '<span style="color:#2ECC71; font-size:1.2em;">&#9679;</span>'
+                sent_label = "Bullish"
+            elif note.get("is_bullish") is False:
+                indicator = '<span style="color:#E74C3C; font-size:1.2em;">&#9679;</span>'
+                sent_label = "Bearish"
+            else:
+                indicator = '<span style="color:#888; font-size:1.2em;">&#9679;</span>'
+                sent_label = "Neutral"
+
+            nc1, nc2, nc3 = st.columns([6, 1, 1])
+            with nc1:
+                created = note.get("created_at", "")[:10] if note.get("created_at") else ""
+                st.markdown(
+                    f'{indicator} **{note["ticker"]}** — {note["title"]} '
+                    f'<span style="opacity:0.5; font-size:0.85em;">({sent_label} · {created})</span>',
+                    unsafe_allow_html=True,
+                )
+            with nc2:
+                if st.button("Edit", key=f"rn_edit_{note['id']}"):
+                    st.session_state["rn_editing"] = True
+                    st.session_state["rn_edit_id"] = note["id"]
+                    st.rerun()
+            with nc3:
+                if st.button("Delete", key=f"rn_del_{note['id']}"):
+                    backend.delete_note(note["id"], _user_id)
+                    backend.log_activity(_user_id, "delete_note", ticker=note["ticker"])
+                    st.rerun()
+
+            if note.get("content"):
+                st.markdown(note["content"])
+            st.markdown("---")
+    else:
+        st.info("No research notes yet. Click 'New Note' to create one.")
+
+    st.stop()
+
 # ── Page: Company Financials ────────────────────────────────────────
 
 # ── Gate: require an active ticker ──────────────────────────────────
@@ -730,6 +1021,12 @@ with _col_input:
 
 ticker = st.session_state["active_ticker"]
 
+# Log ticker view (once per session per ticker)
+_view_key = f"viewed_{ticker}"
+if _view_key not in st.session_state:
+    st.session_state[_view_key] = True
+    backend.log_activity(_user_id, "view_ticker", ticker=ticker)
+
 # ── Fetch company info (cached) ────────────────────────────────────
 
 with st.spinner(f"Fetching data for {ticker}…"):
@@ -756,6 +1053,18 @@ if mc:
 else:
     mc_str = "N/A"
 c3.metric("Market Cap", mc_str)
+
+# Inline watchlist toggle
+_in_wl = backend.is_in_watchlist(_user_id, ticker)
+_wl_label = "Remove from Watchlist" if _in_wl else "Add to Watchlist"
+if st.button(_wl_label, key="cf_wl_toggle"):
+    if _in_wl:
+        backend.remove_from_watchlist(_user_id, ticker)
+        backend.log_activity(_user_id, "remove_watchlist", ticker=ticker)
+    else:
+        backend.add_to_watchlist(_user_id, ticker)
+        backend.log_activity(_user_id, "add_watchlist", ticker=ticker)
+    st.rerun()
 
 st.divider()
 # ── Snapshot: Valuation / Dividend / Margins / Net Debt ──
