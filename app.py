@@ -76,7 +76,7 @@ def _render_auth_page():
         with tab_in:
             email = st.text_input("Email", key="login_email")
             password = st.text_input("Password", type="password", key="login_password")
-            if st.button("Sign In", use_container_width=True, type="primary"):
+            if st.button("Sign In", width="stretch", type="primary"):
                 if not email or not password:
                     st.error("Please enter both email and password.")
                 else:
@@ -104,7 +104,7 @@ def _render_auth_page():
             s_email = st.text_input("Email", key="signup_email")
             s_pass = st.text_input("Password", type="password", key="signup_password")
             s_pass2 = st.text_input("Confirm Password", type="password", key="signup_password2")
-            if st.button("Create Account", use_container_width=True, type="primary"):
+            if st.button("Create Account", width="stretch", type="primary"):
                 if not all([first, last, sid, s_email, s_pass, s_pass2]):
                     st.error("All fields are required.")
                 elif s_pass != s_pass2:
@@ -227,7 +227,7 @@ def _auto_scale(values_in_millions):
     return [v * 1000 if v is not None else 0 for v in values_in_millions], "K"
 
 
-def _bar(dates, values, title, prefix="$", suffix="M", decimals=1, auto_scale=False):
+def _bar(dates, values, title, prefix="$", suffix="M", decimals=2, auto_scale=False):
     """Plotly bar chart with zoom disabled."""
     if auto_scale:
         values, suffix = _auto_scale(values)
@@ -266,7 +266,7 @@ def _stacked_bar(dates, bottom_vals, top_vals, bottom_name, top_name,
         bottom_vals = [v / divisor if v is not None else 0 for v in bottom_vals]
         top_vals = [v / divisor if v is not None else 0 for v in top_vals]
 
-    fmt = ",.1f"
+    fmt = ",.2f"
     ht = f"%{{fullData.name}}: {prefix}%{{y:{fmt}}}{suffix}<extra></extra>"
     fig = go.Figure(data=[
         go.Bar(x=dates, y=bottom_vals, name=bottom_name,
@@ -290,11 +290,12 @@ def _stacked_bar(dates, bottom_vals, top_vals, bottom_name, top_name,
 
 def _bar_with_line(dates, bar_values, line_values, title, bar_name="Revenue",
                    line_name="COGS", bar_color=None, line_color="#E74C3C",
-                   prefix="$", auto_scale=False):
+                   prefix="$", suffix=None, auto_scale=False):
     """Bar chart with an overlaid line trace."""
     if bar_color is None:
         bar_color = BAR_COLOR
-    suffix = "M"
+    if suffix is None:
+        suffix = "M"
     if auto_scale:
         all_vals = [v for v in bar_values + line_values if v is not None]
         max_abs = max((abs(v) for v in all_vals), default=0)
@@ -307,7 +308,7 @@ def _bar_with_line(dates, bar_values, line_values, title, bar_name="Revenue",
         bar_values = [v / divisor if v is not None else 0 for v in bar_values]
         line_values = [v / divisor if v is not None else 0 for v in line_values]
 
-    fmt = ",.1f"
+    fmt = ",.2f"
     ht = f"%{{fullData.name}}: {prefix}%{{y:{fmt}}}{suffix}<extra></extra>"
     fig = go.Figure(data=[
         go.Bar(x=dates, y=bar_values, name=bar_name,
@@ -371,7 +372,7 @@ def _grouped_bar(dates, traces, title, prefix="$", auto_scale=False, stacked=Fal
     else:
         suffix = "M"
 
-    fmt = ",.1f"
+    fmt = ",.2f"
     bars = []
     for t in traces:
         bars.append(go.Bar(
@@ -412,7 +413,7 @@ def _stacked_grouped_bar(dates, cash_vals, debt_vals, lease_vals, title, auto_sc
     else:
         suffix = "M"
 
-    fmt = ",.1f"
+    fmt = ",.2f"
     ht = f"%{{fullData.name}}: {prefix}%{{y:{fmt}}}{suffix}<extra></extra>"
     ht_lease = f"%{{fullData.name}}: {prefix}%{{customdata[0]:{fmt}}}{suffix}<extra></extra>"
     fig = go.Figure(data=[
@@ -441,7 +442,7 @@ def _stacked_grouped_bar(dates, cash_vals, debt_vals, lease_vals, title, auto_sc
 def _multi_line(dates, traces, title, prefix="", suffix="%"):
     """Plotly multi-line chart with legend toggle.
     traces = list of {"name", "values", "color"} dicts."""
-    fmt = ",.1f"
+    fmt = ",.2f"
     lines = []
     for t in traces:
         lines.append(go.Scatter(
@@ -502,17 +503,35 @@ def _multi_line_with_avg(dates, traces, title, prefix="", suffix=""):
     return fig
 
 
-@st.dialog("Chart", width="large")
+def _add_logo(fig):
+    """Add VFC logo watermark to top-left of chart."""
+    if _logo_b64:
+        fig.add_layout_image(
+            dict(
+                source=f"data:image/png;base64,{_logo_b64}",
+                xref="paper", yref="paper",
+                x=0, y=1.0,
+                sizex=0.10, sizey=0.10,
+                xanchor="left", yanchor="top",
+                opacity=0.6,
+                layer="above",
+            )
+        )
+
+
+@st.dialog("Powered by the Viking Fund Club", width="large")
 def _show_fullscreen(fig, key, series_data=None):
     fig_full = go.Figure(fig)
+    _add_logo(fig_full)
     fig_full.update_layout(
         height=400,
+        xaxis=dict(autorange=True),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5),
     )
-    st.plotly_chart(fig_full, use_container_width=True, config=CHART_CFG, key=f"full_{key}")
+    st.plotly_chart(fig_full, width="stretch", config=CHART_CFG, key=f"full_{key}")
 
     if series_data:
-        periods = [("1Y", 1), ("2Y", 2)]
+        periods = [("1Y", 1), ("2Y", 2), ("5Y", 5), ("10Y", 10)]
         chips = []
         for s in series_data:
             vals = [v for v in s["values"] if v is not None and v == v]
@@ -548,11 +567,16 @@ def _show_fullscreen(fig, key, series_data=None):
                         f'border-radius:4px;font-weight:600;background:rgba(150,150,150,0.2);'
                         f'color:#888;">N/A</span>'
                     )
-            chips.append(f'<strong>{s["name"]}</strong> {" &middot; ".join(parts)}')
+            chips.append(
+                f'<div style="background:rgba(150,150,150,0.1);border:1px solid rgba(150,150,150,0.25);'
+                f'border-radius:8px;padding:8px 14px;text-align:center;">'
+                f'<strong>{s["name"]}</strong><br>{" &middot; ".join(parts)}</div>'
+            )
         if chips:
             html = (
-                '<div style="text-align:center;margin-top:4px;font-size:0.95em;">'
-                + " &nbsp;&nbsp; ".join(chips)
+                '<div style="display:flex;flex-wrap:wrap;justify-content:center;gap:8px;'
+                'margin-top:4px;font-size:0.95em;">'
+                + "".join(chips)
                 + "</div>"
             )
             st.markdown(html, unsafe_allow_html=True)
@@ -562,13 +586,20 @@ def _display_chart(fig, key, series_data=None):
     """Display a chart with an expand button that opens it in a fullscreen dialog."""
     col_chart, col_btn = st.columns([40, 1])
     with col_chart:
-        st.plotly_chart(fig, use_container_width=True, config=CHART_CFG, key=f"chart_{key}")
+        # Preview: limit visible range to last 10 data points
+        preview = go.Figure(fig)
+        _add_logo(preview)
+        n_points = len(preview.data[0].x) if preview.data else 0
+        is_category = preview.layout.xaxis.type == "category"
+        if n_points > 10 and is_category:
+            preview.update_layout(xaxis=dict(range=[n_points - 10 - 0.5, n_points - 0.5]))
+        st.plotly_chart(preview, width="stretch", config=CHART_CFG, key=f"chart_{key}")
     with col_btn:
         if st.button("⛶", key=f"expand_{key}", help="Expand chart"):
             _show_fullscreen(fig, key, series_data)
 
 
-def _line(series, title, prefix="$"):
+def _line(series, title, prefix="$", company_logo_url=None):
     """Plotly line chart for price history."""
     fig = go.Figure(data=[
         go.Scatter(
@@ -578,6 +609,18 @@ def _line(series, title, prefix="$"):
             hovertemplate=f"%{{x}}<br>{prefix}%{{y:,.2f}}<extra></extra>",
         )
     ])
+    if company_logo_url:
+        fig.add_layout_image(
+            dict(
+                source=company_logo_url,
+                xref="paper", yref="paper",
+                x=0.5, y=0.5,
+                sizex=0.5, sizey=0.5,
+                xanchor="center", yanchor="middle",
+                opacity=0.08,
+                layer="below",
+            )
+        )
     fig.update_layout(
         title=dict(text=title, font=dict(size=14)),
         xaxis=dict(fixedrange=True, range=[series.index.min(), series.index.max()]),
@@ -611,7 +654,7 @@ st.sidebar.markdown(
     unsafe_allow_html=True,
 )
 
-if st.sidebar.button("Logout", use_container_width=True, key="logout_btn"):
+if st.sidebar.button("Logout", width="stretch", key="logout_btn"):
     backend.sign_out()
     st.rerun()
 
@@ -677,7 +720,7 @@ st.session_state.setdefault("nav_page", "Home")
 # Home button above the "Begin Researching" label
 _home_selected = st.session_state["nav_page"] == "Home"
 if st.sidebar.button(
-    "🏠  Home", key="home_btn", use_container_width=True,
+    "🏠  Home", key="home_btn", width="stretch",
     type="primary" if _home_selected else "secondary",
 ):
     st.session_state["nav_page"] = "Home"
@@ -1066,6 +1109,50 @@ if st.button(_wl_label, key="cf_wl_toggle"):
         backend.log_activity(_user_id, "add_watchlist", ticker=ticker)
     st.rerun()
 
+# ── Price History ───────────────────────────────────────────────────
+
+st.subheader("Price History")
+
+PERIOD_MAP = {"YTD": "ytd", "3M": "3mo", "6M": "6mo", "1Y": "1y", "3Y": "3y", "5Y": "5y", "10Y": "10y"}
+period_label = st.radio(
+    "Price range",
+    list(PERIOD_MAP.keys()),
+    horizontal=True,
+    key="price_period",
+    label_visibility="collapsed",
+)
+
+history = fetch_price(ticker, PERIOD_MAP[period_label])
+if history is not None and not history.empty:
+    _display_chart(
+        _line(history["Close"], f"{ticker} — {period_label}", company_logo_url=logo_url),
+        "price",
+    )
+    # Price change % for selected period
+    _start_price = history["Close"].iloc[0]
+    _end_price = history["Close"].iloc[-1]
+    if _start_price and _start_price != 0:
+        _pct_change = (_end_price - _start_price) / _start_price * 100
+        _sign = "+" if _pct_change >= 0 else ""
+        if _pct_change >= 0:
+            _color = "#27ae60"
+        else:
+            _color = "#e74c3c"
+        st.markdown(
+            f'<div style="text-align:center; font-size:1.1rem; margin-top:-0.5rem;">'
+            f'{period_label} Change: '
+            f'<span style="font-weight:700; color:{_color};">{_sign}{_pct_change:.2f}%</span>'
+            f' &nbsp;(${_start_price:.2f} → ${_end_price:.2f})'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+else:
+    st.info("No price history available.")
+
+if info["summary"]:
+    with st.expander("Business Summary"):
+        st.write(info["summary"])
+
 st.divider()
 # ── Snapshot: Valuation / Dividend / Margins / Net Debt ──
 snap_c1, snap_c2, snap_c3, snap_c4 = st.columns(4)
@@ -1084,13 +1171,7 @@ with snap_c2:
     st.markdown(f"Yield &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;{_fmt_pct(info.get('dividend_yield'))}")
     st.markdown(f"Payout Ratio {_fmt_pct(info.get('payout_ratio'))}")
     ex_div = info.get("ex_dividend_date")
-    if ex_div is not None:
-        try:
-            ex_div_str = datetime.fromtimestamp(ex_div).strftime("%Y-%m-%d")
-        except (ValueError, TypeError, OSError):
-            ex_div_str = "N/A"
-    else:
-        ex_div_str = "N/A"
+    ex_div_str = ex_div if isinstance(ex_div, str) else "N/A"
     st.markdown(f"Ex-Div &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;{ex_div_str}")
 
 with snap_c3:
@@ -1121,21 +1202,43 @@ with snap_c4:
     else:
         st.markdown("Net Debt &nbsp;N/A")
 
-if info["summary"]:
-    with st.expander("Business Summary"):
-        st.write(info["summary"])
-
 # ── Key Fundamental Metrics ─────────────────────────────────────────
 
 st.subheader("Key Fundamental Metrics")
 
-mode = st.radio(
-    "Metric time frame",
-    ["Annual", "TTM", "Quarterly"],
-    horizontal=True,
-    key="metrics_mode",
-    label_visibility="collapsed",
-)
+# Styled metric mode toggle
+st.markdown("""
+<style>
+/* Metric toggle — selected (primary): flat light green + slide-up */
+@keyframes slideUp {
+    from { margin-top: 2.2rem; opacity: 0.7; }
+    to   { margin-top: 0; opacity: 1; }
+}
+[data-testid="stMainBlockContainer"] button[kind="primary"] {
+    background: rgba(46, 204, 113, 0.2) !important;
+    border: 1px solid #2ECC71 !important;
+    color: inherit !important;
+    box-shadow: none !important;
+    animation: slideUp 0.3s ease forwards;
+}
+[data-testid="stMainBlockContainer"] button[kind="primary"]:hover {
+    background: rgba(46, 204, 113, 0.3) !important;
+    box-shadow: none !important;
+}
+</style>
+""", unsafe_allow_html=True)
+
+st.session_state.setdefault("metrics_mode_sel", "Annual")
+_, _toggle_col, _ = st.columns([2, 3, 2])
+with _toggle_col:
+    _tc = st.columns(3)
+    for _i, _label in enumerate(["Annual", "TTM", "Quarterly"]):
+        with _tc[_i]:
+            _btn_type = "primary" if st.session_state["metrics_mode_sel"] == _label else "secondary"
+            if st.button(_label, key=f"mode_{_label}", width="stretch", type=_btn_type):
+                st.session_state["metrics_mode_sel"] = _label
+                st.rerun()
+mode = st.session_state["metrics_mode_sel"]
 mode_key = mode.lower()
 
 metrics = fetch_metrics(ticker, mode_key)
@@ -1154,8 +1257,10 @@ if metrics is not None and not metrics.empty:
     _t1, _t2, _t3 = st.columns(3)
     with _t1:
         show_cogs = st.toggle("Show COGS", key="show_cogs")
+    with _t2:
+        show_basic_eps = st.toggle("Show Undiluted EPS", key="show_basic_eps")
     with _t3:
-        show_ebitda_breakdown = st.toggle("EBIT & D\u200BA Breakdown", key="show_ebitda_breakdown")
+        show_opex = st.toggle("Show OpEx", key="show_opex")
     c1, c2, c3 = st.columns(3)
     with c1:
         if show_cogs:
@@ -1170,10 +1275,40 @@ if metrics is not None and not metrics.empty:
             _display_chart(_bar(dates, vals("Revenue ($M)"), "Revenue", auto_scale=True), "revenue",
                            series_data=[{"name": "Revenue", "values": vals("Revenue ($M)")}])
     with c2:
-        _display_chart(_bar(dates, vals("Diluted EPS ($)"), "Diluted EPS",
-                             prefix="$", suffix="", decimals=2), "eps",
-                       series_data=[{"name": "EPS", "values": vals("Diluted EPS ($)")}])
+        if show_basic_eps:
+            _display_chart(_bar_with_line(
+                dates, vals("Diluted EPS ($)"), vals("Basic EPS ($)"),
+                title="EPS", bar_name="EPS", line_name="Undiluted",
+                line_color="#2ECC71", prefix="$", suffix="", auto_scale=False,
+            ), "eps", series_data=[
+                {"name": "EPS", "values": vals("Diluted EPS ($)")},
+                {"name": "Undiluted EPS", "values": vals("Basic EPS ($)")},
+            ])
+        else:
+            _display_chart(_bar(dates, vals("Diluted EPS ($)"), "EPS",
+                                 prefix="$", suffix="", decimals=2), "eps",
+                           series_data=[{"name": "EPS", "values": vals("Diluted EPS ($)")}])
     with c3:
+        if show_opex:
+            _display_chart(_bar_with_line(
+                dates, vals("Operating Income ($M)"), vals("Operating Expenses ($M)"),
+                title="Operating Income & OpEx", bar_name="Op. Income",
+                line_name="OpEx", line_color="#E74C3C", auto_scale=True,
+            ), "op_income", series_data=[
+                {"name": "Operating Income", "values": vals("Operating Income ($M)")},
+                {"name": "Operating Expenses", "values": vals("Operating Expenses ($M)")},
+            ])
+        else:
+            _display_chart(_bar(dates, vals("Operating Income ($M)"), "Operating Income",
+                                 auto_scale=True), "op_income",
+                           series_data=[{"name": "Operating Income", "values": vals("Operating Income ($M)")}])
+
+    # EBITDA & Expenses row
+    _te1, _te2 = st.columns(2)
+    with _te1:
+        show_ebitda_breakdown = st.toggle("EBIT & D\u200BA Breakdown", key="show_ebitda_breakdown")
+    c1, c2 = st.columns(2)
+    with c1:
         if show_ebitda_breakdown:
             _display_chart(_stacked_bar(
                 dates,
@@ -1192,17 +1327,34 @@ if metrics is not None and not metrics.empty:
         else:
             _display_chart(_bar(dates, vals("EBITDA ($M)"), "EBITDA", auto_scale=True), "ebitda",
                            series_data=[{"name": "EBITDA", "values": vals("EBITDA ($M)")}])
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        _display_chart(_grouped_bar(dates, [
-            {"name": "CAPEX", "values": vals("CAPEX ($M)"), "color": "#3498DB"},
-            {"name": "R&D", "values": vals("R&D ($M)"), "color": "#9B59B6"},
-            {"name": "SG&A", "values": vals("SG&A ($M)"), "color": "#E67E22"},
-        ], "Expenses", auto_scale=True, stacked=True), "expenses", series_data=[
-            {"name": "CAPEX", "values": vals("CAPEX ($M)")},
-            {"name": "R&D", "values": vals("R&D ($M)")},
-            {"name": "SG&A", "values": vals("SG&A ($M)")},
-        ])
+    with c2:
+        # Split SG&A into G&A + S&M when the company reports them separately
+        _ga_vals = vals("G&A ($M)") if "G&A ($M)" in metrics.index else None
+        _sm_vals = vals("S&M ($M)") if "S&M ($M)" in metrics.index else None
+        _has_split = _ga_vals and _sm_vals and any(v != 0 for v in _ga_vals)
+
+        if _has_split:
+            _display_chart(_grouped_bar(dates, [
+                {"name": "CAPEX", "values": vals("CAPEX ($M)"), "color": "#3498DB"},
+                {"name": "R&D", "values": vals("R&D ($M)"), "color": "#9B59B6"},
+                {"name": "G&A", "values": _ga_vals, "color": "#E67E22"},
+                {"name": "S&M", "values": _sm_vals, "color": "#E74C3C"},
+            ], "Expenses", auto_scale=True, stacked=True), "expenses", series_data=[
+                {"name": "CAPEX", "values": vals("CAPEX ($M)")},
+                {"name": "R&D", "values": vals("R&D ($M)")},
+                {"name": "G&A", "values": _ga_vals},
+                {"name": "S&M", "values": _sm_vals},
+            ])
+        else:
+            _display_chart(_grouped_bar(dates, [
+                {"name": "CAPEX", "values": vals("CAPEX ($M)"), "color": "#3498DB"},
+                {"name": "R&D", "values": vals("R&D ($M)"), "color": "#9B59B6"},
+                {"name": "SG&A", "values": vals("SG&A ($M)"), "color": "#E67E22"},
+            ], "Expenses", auto_scale=True, stacked=True), "expenses", series_data=[
+                {"name": "CAPEX", "values": vals("CAPEX ($M)")},
+                {"name": "R&D", "values": vals("R&D ($M)")},
+                {"name": "SG&A", "values": vals("SG&A ($M)")},
+            ])
 
     # Cash Flow
     st.markdown("**Cash Flow**")
@@ -1259,6 +1411,18 @@ if metrics is not None and not metrics.empty:
             {"name": "ROE", "values": vals("ROE (%)")},
             {"name": "ROA", "values": vals("ROA (%)")},
         ])
+    with c2:
+        _display_chart(_multi_line(dates, [
+            {"name": "Gross", "values": vals("Gross Margin (%)"), "color": "#2ECC71"},
+            {"name": "Operating", "values": vals("Operating Margin (%)"), "color": "#3498DB"},
+            {"name": "Net", "values": vals("Net Margin (%)"), "color": "#E67E22"},
+            {"name": "EBITDA", "values": vals("EBITDA Margin (%)"), "color": "#9B59B6"},
+        ], "Profitability Margins"), "margins", series_data=[
+            {"name": "Gross Margin", "values": vals("Gross Margin (%)")},
+            {"name": "Operating Margin", "values": vals("Operating Margin (%)")},
+            {"name": "Net Margin", "values": vals("Net Margin (%)")},
+            {"name": "EBITDA Margin", "values": vals("EBITDA Margin (%)")},
+        ])
     c1, c2 = st.columns(2)
     with c1:
         _display_chart(_multi_line_with_avg(dates, [
@@ -1297,25 +1461,6 @@ if metrics is not None and not metrics.empty:
 else:
     st.info("No metric data available.")
 
-# ── Price History ───────────────────────────────────────────────────
-
-st.subheader("Price History")
-
-PERIOD_MAP = {"3Y": "3y", "1Y": "1y", "6M": "6mo", "YTD": "ytd"}
-period_label = st.radio(
-    "Price range",
-    list(PERIOD_MAP.keys()),
-    horizontal=True,
-    key="price_period",
-    label_visibility="collapsed",
-)
-
-history = fetch_price(ticker, PERIOD_MAP[period_label])
-if history is not None and not history.empty:
-    _display_chart(_line(history["Close"], f"{ticker} — {period_label}"), "price")
-else:
-    st.info("No price history available.")
-
 # ── Full Financial Statements ───────────────────────────────────────
 
 st.divider()
@@ -1325,20 +1470,20 @@ st.caption("Values in millions ($M). EPS in $/share. Tax Rate in %.")
 with st.expander("Income Statement"):
     fin = fetch_financials(ticker)
     if fin is not None and not fin.empty:
-        st.dataframe(_format_statement_display(fin), use_container_width=True)
+        st.dataframe(_format_statement_display(fin), width="stretch")
     else:
         st.info("No income statement data available.")
 
 with st.expander("Balance Sheet"):
     bal = fetch_balance(ticker)
     if bal is not None and not bal.empty:
-        st.dataframe(_format_statement_display(bal), use_container_width=True)
+        st.dataframe(_format_statement_display(bal), width="stretch")
     else:
         st.info("No balance sheet data available.")
 
 with st.expander("Cash Flow Statement"):
     cf = fetch_cashflow(ticker)
     if cf is not None and not cf.empty:
-        st.dataframe(_format_statement_display(cf), use_container_width=True)
+        st.dataframe(_format_statement_display(cf), width="stretch")
     else:
         st.info("No cash flow data available.")

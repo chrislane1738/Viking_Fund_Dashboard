@@ -1,6 +1,7 @@
 streamlit
-yfinance
 pandas
 plotly
-requests-cache
+requests
 supabase>=2.3.0
+yfinance
+requests-cache
