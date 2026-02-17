@@ -309,6 +309,16 @@ def _fmp_get(endpoint: str, params: dict | None = None) -> list | dict:
     return resp.json()
 
 
+def _fmp_get_legacy(path: str, params: dict | None = None) -> list | dict:
+    """Authenticated GET to legacy FMP v3 endpoints (e.g. historical DCF)."""
+    params = params or {}
+    params["apikey"] = _get_fmp_key()
+    url = f"https://financialmodelingprep.com/{path}"
+    resp = requests.get(url, params=params, timeout=15)
+    resp.raise_for_status()
+    return resp.json()
+
+
 def _safe_get(d: dict | list, key: str, default=None):
     """Safely get a key from a dict; return default if d is a list or key missing."""
     if isinstance(d, dict):
@@ -349,6 +359,7 @@ class FMPProvider(DataProvider):
         # Forward PE from analyst estimates
         forward_pe = None
         forward_peg = None
+        forward_eps_out = None
         try:
             estimates = _fmp_get("analyst-estimates", {"symbol": ticker, "period": "annual", "limit": 10})
             if isinstance(estimates, list) and estimates:
@@ -358,6 +369,7 @@ class FMPProvider(DataProvider):
                     est_date = datetime.strptime(est["date"], "%Y-%m-%d") if est.get("date") else None
                     forward_eps_avg = est.get("epsAvg")
                     if est_date and est_date > today and forward_eps_avg and forward_eps_avg != 0:
+                        forward_eps_out = forward_eps_avg
                         price_now = profile.get("price")
                         if price_now and price_now > 0:
                             forward_pe = price_now / forward_eps_avg
@@ -403,6 +415,7 @@ class FMPProvider(DataProvider):
             "price_to_book": ratios_ttm.get("priceToBookRatioTTM"),
             "ev_to_ebitda": ratios_ttm.get("enterpriseValueMultipleTTM"),
             "forward_peg": forward_peg,
+            "forward_eps": forward_eps_out,
             # Dividend
             "dividend_yield": ratios_ttm.get("dividendYieldTTM"),
             "payout_ratio": ratios_ttm.get("dividendPayoutRatioTTM"),
@@ -1068,6 +1081,7 @@ if _HAS_YFINANCE:
                 "price_to_book": info.get("priceToBook"),
                 "ev_to_ebitda": info.get("enterpriseToEbitda"),
                 "forward_peg": None,
+                "forward_eps": None,
                 "debt_to_equity": info.get("debtToEquity"),
                 "dividend_yield": info.get("trailingAnnualDividendYield"),
                 "payout_ratio": info.get("payoutRatio"),
@@ -1409,6 +1423,77 @@ def fetch_econ_calendar(from_date: str, to_date: str) -> list[dict]:
         return data if isinstance(data, list) else []
     except Exception:
         return []
+
+
+# ── Valuation helpers ────────────────────────────────────────────────
+
+def fetch_stock_peers(ticker: str) -> list[str]:
+    """Return list of peer tickers for comparable analysis."""
+    try:
+        data = _fmp_get("stock-peers", {"symbol": ticker})
+        if isinstance(data, list) and data:
+            return data[0].get("peersList", []) if isinstance(data[0], dict) else []
+        if isinstance(data, dict):
+            return data.get("peersList", [])
+        return []
+    except Exception:
+        return []
+
+
+def fetch_dcf(ticker: str) -> dict:
+    """Return current DCF intrinsic value and stock price."""
+    try:
+        data = _fmp_get("discounted-cash-flow", {"symbol": ticker})
+        if isinstance(data, list) and data:
+            return data[0]
+        if isinstance(data, dict):
+            return data
+        return {}
+    except Exception:
+        return {}
+
+
+def fetch_historical_dcf(ticker: str) -> list[dict]:
+    """Return historical DCF values (date, dcf, Stock Price) via legacy v3 endpoint."""
+    try:
+        data = _fmp_get_legacy(
+            f"api/v3/historical-discounted-cash-flow-statement/{ticker}",
+            {"limit": "40"},
+        )
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def fetch_levered_dcf(ticker: str) -> dict:
+    """Return levered DCF with WACC breakdown fields."""
+    try:
+        data = _fmp_get("levered-discounted-cash-flow", {"symbol": ticker})
+        if isinstance(data, list) and data:
+            return data[0]
+        if isinstance(data, dict):
+            return data
+        return {}
+    except Exception:
+        return {}
+
+
+def fetch_custom_dcf(ticker: str, **kwargs) -> dict:
+    """Run a custom DCF with user-supplied assumptions.
+    kwargs: revenueGrowthPct, ebitdaPct, longTermGrowthRate, taxRate,
+            capitalExpenditurePct, costOfEquity, costOfDebt.
+    """
+    try:
+        params = {"symbol": ticker}
+        params.update(kwargs)
+        data = _fmp_get("custom-discounted-cash-flow", params)
+        if isinstance(data, list) and data:
+            return data[0]
+        if isinstance(data, dict):
+            return data
+        return {}
+    except Exception:
+        return {}
 
 
 # ── Factory / default provider ──────────────────────────────────────

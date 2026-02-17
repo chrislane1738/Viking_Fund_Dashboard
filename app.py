@@ -7,7 +7,7 @@ import plotly.graph_objects as go
 import base64
 from pathlib import Path
 from datetime import datetime, timedelta
-from data_manager import get_provider, _format_statement_display, fetch_earnings_calendar, fetch_stock_news, fetch_ticker_earnings, _fmp_get, fetch_fred_series, fetch_treasury_rates, fetch_econ_calendar
+from data_manager import get_provider, _format_statement_display, fetch_earnings_calendar, fetch_stock_news, fetch_ticker_earnings, _fmp_get, fetch_fred_series, fetch_treasury_rates, fetch_econ_calendar, fetch_stock_peers, fetch_dcf, fetch_historical_dcf, fetch_levered_dcf, fetch_custom_dcf
 import backend
 
 
@@ -349,6 +349,22 @@ def fetch_treasury_rates_cached(from_date, to_date):
 def fetch_econ_calendar_cached(from_date, to_date):
     return fetch_econ_calendar(from_date, to_date)
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_peers_cached(ticker):
+    return fetch_stock_peers(ticker)
+
+@st.cache_data(ttl=900, show_spinner=False)
+def fetch_dcf_cached(ticker):
+    return fetch_dcf(ticker)
+
+@st.cache_data(ttl=900, show_spinner=False)
+def fetch_hist_dcf_cached(ticker):
+    return fetch_historical_dcf(ticker)
+
+@st.cache_data(ttl=900, show_spinner=False)
+def fetch_levered_dcf_cached(ticker):
+    return fetch_levered_dcf(ticker)
+
 
 # ── Chart helpers ───────────────────────────────────────────────────
 
@@ -579,14 +595,17 @@ def _grouped_bar(dates, traces, title, prefix="$", auto_scale=False, stacked=Fal
     return fig
 
 
-def _comparison_bar(tickers, values, colors, title):
+def _comparison_bar(tickers, values, colors, title, highlight_ticker=None):
     """Vertical bar chart comparing a single metric across tickers.
     values may contain None for unavailable data.
     Includes full-width average (red) and median (yellow) lines."""
     import statistics as _stats
     display_vals = [v if v is not None else 0 for v in values]
     text_labels = [f"{v:.2f}" if v is not None else "N/A" for v in values]
-    bar_colors = ["#1B7A3D"] * len(tickers)
+    if highlight_ticker:
+        bar_colors = ["#3498DB" if t == highlight_ticker else "#1B7A3D" for t in tickers]
+    else:
+        bar_colors = ["#1B7A3D"] * len(tickers)
 
     valid = [v for v in values if v is not None]
     avg_val = sum(valid) / len(valid) if valid else None
@@ -846,14 +865,14 @@ def _multi_line_with_avg(dates, traces, title, prefix="", suffix="",
     return fig
 
 
-def _multiples_line(dates, values, title, show_stats=False):
+def _multiples_line(dates, values, title, show_stats=False, color="#3498DB"):
     """Single-trace line chart for a valuation multiple with optional median/average lines."""
     import statistics
     fmt = ",.2f"
     lines = [go.Scatter(
         x=dates, y=values, name=title,
         mode="lines+markers",
-        line=dict(color="#3498DB", width=2),
+        line=dict(color=color, width=2),
         hovertemplate=f"%{{fullData.name}}: %{{y:{fmt}}}x<extra></extra>",
     )]
     if show_stats:
@@ -904,6 +923,44 @@ def _add_logo(fig):
         )
 
 
+def _apply_chart_theme(fig):
+    """Apply dark/light styling to a Plotly figure based on theme mode."""
+    _layout_json = fig.layout.to_plotly_json()
+    _has_title = bool(_layout_json.get("title", {}).get("text"))
+    if st.session_state.get("theme_mode") == "Dark":
+        _upd = dict(
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            font_color="#fafafa",
+            legend_font_color="#fafafa",
+            xaxis=dict(gridcolor="rgba(255,255,255,0.1)", color="#fafafa",
+                       tickfont=dict(color="#fafafa"), title_font_color="#fafafa"),
+            yaxis=dict(gridcolor="rgba(255,255,255,0.1)", color="#fafafa",
+                       tickfont=dict(color="#fafafa"), title_font_color="#fafafa"),
+        )
+        if _has_title:
+            _upd["title_font_color"] = "#fafafa"
+        fig.update_layout(**_upd)
+        if "yaxis2" in _layout_json:
+            fig.update_layout(yaxis2=dict(color="#fafafa", tickfont=dict(color="#fafafa"), title_font_color="#fafafa"))
+    elif st.session_state.get("theme_mode") == "Light":
+        _upd = dict(
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            font_color="#31333F",
+            legend_font_color="#31333F",
+            xaxis=dict(gridcolor="rgba(0,0,0,0.1)", color="#31333F",
+                       tickfont=dict(color="#31333F"), title_font_color="#31333F"),
+            yaxis=dict(gridcolor="rgba(0,0,0,0.1)", color="#31333F",
+                       tickfont=dict(color="#31333F"), title_font_color="#31333F"),
+        )
+        if _has_title:
+            _upd["title_font_color"] = "#31333F"
+        fig.update_layout(**_upd)
+        if "yaxis2" in _layout_json:
+            fig.update_layout(yaxis2=dict(color="#31333F", tickfont=dict(color="#31333F"), title_font_color="#31333F"))
+
+
 @st.dialog("Powered by the Viking Fund Club", width="large")
 def _show_fullscreen(fig, key, series_data=None, mode="annual",
                      toggles=None, radios=None, chart_builder=None, no_logo=False):
@@ -944,6 +1001,7 @@ def _show_fullscreen(fig, key, series_data=None, mode="annual",
         xaxis=dict(autorange=True, fixedrange=True),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5),
     )
+    _apply_chart_theme(fig_full)
     st.plotly_chart(fig_full, width="stretch", config=CHART_CFG, key=f"full_{key}")
 
     if series_data:
@@ -978,13 +1036,13 @@ def _show_fullscreen(fig, key, series_data=None, mode="annual",
                         parts.append(
                             f'{label}: <span style="display:inline-block;padding:2px 8px;'
                             f'border-radius:4px;font-weight:600;background:rgba(150,150,150,0.2);'
-                            f'color:#888;">N/A</span>'
+                            f'color:rgba(150,150,150,0.85);">N/A</span>'
                         )
                 else:
                     parts.append(
                         f'{label}: <span style="display:inline-block;padding:2px 8px;'
                         f'border-radius:4px;font-weight:600;background:rgba(150,150,150,0.2);'
-                        f'color:#888;">N/A</span>'
+                        f'color:rgba(150,150,150,0.85);">N/A</span>'
                     )
             chips.append(
                 f'<div style="background:rgba(150,150,150,0.1);border:1px solid rgba(150,150,150,0.25);'
@@ -1014,6 +1072,7 @@ def _display_chart(fig, key, series_data=None, mode="annual",
         is_category = preview.layout.xaxis.type == "category"
         if n_points > 10 and is_category:
             preview.update_layout(xaxis=dict(range=[n_points - 10 - 0.5, n_points - 0.5]))
+        _apply_chart_theme(preview)
         st.plotly_chart(preview, width="stretch", config=CHART_CFG, key=f"chart_{key}")
     with col_btn:
         if st.button("⛶", key=f"expand_{key}", help="Expand chart"):
@@ -1102,6 +1161,158 @@ if st.sidebar.button("Logout", width="stretch", key="logout_btn"):
     backend.sign_out()
     st.rerun()
 
+# ── Theme toggle (Light / Dark / Auto) ──
+st.session_state.setdefault("theme_mode", "Auto")
+_theme_sel = st.sidebar.radio(
+    "Theme", ["Light", "Dark", "Auto"],
+    index=["Light", "Dark", "Auto"].index(st.session_state["theme_mode"]),
+    horizontal=True, key="_theme_radio", label_visibility="collapsed",
+)
+if _theme_sel != st.session_state["theme_mode"]:
+    st.session_state["theme_mode"] = _theme_sel
+    st.rerun()
+
+# ── Apply theme via CSS overrides (no reload — preserves auth) ──
+_LIGHT_CSS = """
+<style id="theme-override">
+[data-testid="stApp"] { background-color: #ffffff !important; color: #31333F !important; }
+[data-testid="stHeader"] { background-color: rgba(255,255,255,0.8) !important; }
+[data-testid="stSidebar"], [data-testid="stSidebarContent"] { background-color: #f0f2f6 !important; color: #31333F !important; }
+[data-testid="stMainBlockContainer"] { color: #31333F !important; }
+.stMarkdown, .stMarkdown p, .stMarkdown span, .stMarkdown div,
+.stMetric label, .stMetric [data-testid="stMetricValue"],
+[data-testid="stExpander"] summary span, [data-testid="stExpander"] div { color: #31333F !important; }
+.stSelectbox label, .stMultiSelect label, .stTextInput label { color: #31333F !important; }
+hr { border-color: rgba(0,0,0,0.1) !important; }
+/* Expander containers */
+[data-testid="stExpander"] { background-color: #f8f9fa !important; border-color: rgba(0,0,0,0.1) !important; border-radius: 8px !important; }
+[data-testid="stExpander"] summary { background-color: #f8f9fa !important; }
+[data-testid="stExpander"] details > div { background-color: #f8f9fa !important; }
+/* Sidebar hover */
+section[data-testid="stSidebar"] .stButton button:hover { background: rgba(0,0,0,0.08) !important; }
+/* Dialog / fullscreen */
+div[role="dialog"], div[data-testid="stDialog"] { background-color: #ffffff !important; color: #31333F !important; }
+div[role="dialog"] .stMarkdown, div[role="dialog"] .stMarkdown p,
+div[role="dialog"] .stMarkdown span, div[role="dialog"] .stMarkdown div,
+div[role="dialog"] .stMarkdown strong { color: #31333F !important; }
+div[role="dialog"] .stToggle label, div[role="dialog"] .stToggle label span,
+div[role="dialog"] .stToggle label p, div[role="dialog"] .stToggle label div,
+div[role="dialog"] .stToggle [data-testid="stWidgetLabel"],
+div[role="dialog"] .stToggle [data-testid="stWidgetLabel"] p,
+div[role="dialog"] .stRadio label, div[role="dialog"] .stRadio label span,
+div[role="dialog"] .stRadio label p, div[role="dialog"] .stRadio [data-testid="stWidgetLabel"],
+div[role="dialog"] .stRadio [data-testid="stWidgetLabel"] p,
+div[role="dialog"] .stCheckbox label, div[role="dialog"] .stCheckbox label span { color: #31333F !important; }
+/* Inputs & text areas */
+.stTextInput input, .stSelectbox [data-baseweb="select"],
+.stNumberInput input, .stTextArea textarea { background-color: #ffffff !important; color: #31333F !important; border-color: rgba(0,0,0,0.15) !important; }
+/* Dataframe */
+.stDataFrame, .stDataFrame [data-testid="stDataFrameResizable"] { color: #31333F !important; }
+/* Toggle / checkbox label */
+.stToggle label, .stToggle label span, .stToggle label p, .stToggle label div,
+.stToggle [data-testid="stWidgetLabel"], .stToggle [data-testid="stWidgetLabel"] p,
+.stToggle [data-testid="stWidgetLabel"] span, .stToggle [data-testid="stWidgetLabel"] div,
+.stCheckbox label, .stCheckbox label span, .stCheckbox label p,
+[data-testid="stCheckbox"] label span, [data-testid="stCheckbox"] label p { color: #31333F !important; }
+</style>
+"""
+_DARK_CSS = """
+<style id="theme-override">
+[data-testid="stApp"] { background-color: #0e1117 !important; color: #fafafa !important; }
+[data-testid="stHeader"] { background-color: rgba(14,17,23,0.8) !important; }
+[data-testid="stSidebar"], [data-testid="stSidebarContent"] { background-color: #262730 !important; color: #fafafa !important; }
+[data-testid="stMainBlockContainer"] { color: #fafafa !important; }
+.stMarkdown, .stMarkdown p, .stMarkdown span, .stMarkdown div,
+.stMetric label, .stMetric [data-testid="stMetricValue"],
+[data-testid="stExpander"] summary span, [data-testid="stExpander"] div { color: #fafafa !important; }
+.stSelectbox label, .stMultiSelect label, .stTextInput label { color: #fafafa !important; }
+hr { border-color: rgba(255,255,255,0.1) !important; }
+/* Expander containers */
+[data-testid="stExpander"] { background-color: #1a1c24 !important; border-color: rgba(255,255,255,0.1) !important; border-radius: 8px !important; }
+[data-testid="stExpander"] summary { background-color: #1a1c24 !important; }
+[data-testid="stExpander"] details > div { background-color: #1a1c24 !important; }
+/* Sidebar hover */
+section[data-testid="stSidebar"] .stButton button:hover { background: rgba(255,255,255,0.1) !important; }
+/* Dialog / fullscreen — background & all text */
+div[role="dialog"], div[data-testid="stDialog"] { background-color: #1a1c24 !important; color: #fafafa !important; }
+div[role="dialog"] *, div[data-testid="stDialog"] * { color: #fafafa !important; }
+div[role="dialog"] .stMarkdown, div[role="dialog"] .stMarkdown p,
+div[role="dialog"] .stMarkdown span, div[role="dialog"] .stMarkdown div,
+div[role="dialog"] .stMarkdown strong { color: #fafafa !important; }
+div[role="dialog"] .stToggle label, div[role="dialog"] .stToggle label span,
+div[role="dialog"] .stToggle label p, div[role="dialog"] .stToggle label div,
+div[role="dialog"] .stToggle [data-testid="stWidgetLabel"],
+div[role="dialog"] .stToggle [data-testid="stWidgetLabel"] p,
+div[role="dialog"] .stToggle [data-testid="stWidgetLabel"] span,
+div[role="dialog"] .stRadio label, div[role="dialog"] .stRadio label span,
+div[role="dialog"] .stRadio label p, div[role="dialog"] .stRadio [data-testid="stWidgetLabel"],
+div[role="dialog"] .stRadio [data-testid="stWidgetLabel"] p,
+div[role="dialog"] .stCheckbox label, div[role="dialog"] .stCheckbox label span { color: #fafafa !important; }
+/* Inputs & text areas */
+.stTextInput input, .stNumberInput input, .stTextArea textarea {
+    background-color: #262730 !important; color: #fafafa !important; border-color: rgba(255,255,255,0.3) !important; }
+.stTextInput input::placeholder, .stNumberInput input::placeholder { color: rgba(250,250,250,0.5) !important; }
+/* Number input label + stepper buttons */
+.stNumberInput label, .stNumberInput label span, .stNumberInput label p,
+.stNumberInput [data-testid="stWidgetLabel"], .stNumberInput [data-testid="stWidgetLabel"] p { color: #fafafa !important; }
+.stNumberInput button, .stNumberInput [data-baseweb="input"] button {
+    background-color: #262730 !important; color: #fafafa !important; border-color: rgba(255,255,255,0.3) !important; }
+/* Selectbox / dropdown — dark bg + white text + visible border */
+.stSelectbox [data-baseweb="select"],
+.stSelectbox [data-baseweb="select"] > div {
+    background-color: #262730 !important; color: #fafafa !important;
+    border-color: rgba(255,255,255,0.3) !important; }
+.stSelectbox [data-baseweb="select"] * { color: #fafafa !important; background-color: transparent !important; }
+.stSelectbox [data-baseweb="select"] svg { fill: #fafafa !important; }
+.stMultiSelect [data-baseweb="select"],
+.stMultiSelect [data-baseweb="select"] > div {
+    background-color: #262730 !important; color: #fafafa !important;
+    border-color: rgba(255,255,255,0.3) !important; }
+.stMultiSelect [data-baseweb="select"] * { color: #fafafa !important; background-color: transparent !important; }
+/* Dropdown menu (popover) — lighter gray bg + white text */
+[data-baseweb="popover"] { background-color: #3a3c4a !important; border: 1px solid rgba(255,255,255,0.25) !important; }
+[data-baseweb="popover"] ul, [data-baseweb="popover"] li,
+[data-baseweb="menu"], [data-baseweb="menu"] ul, [data-baseweb="menu"] li {
+    background-color: #3a3c4a !important; color: #fafafa !important; }
+[data-baseweb="menu"] li:hover, [data-baseweb="popover"] li:hover { background-color: #4a4d5e !important; }
+[data-baseweb="menu"] li[aria-selected="true"] { background-color: #4a4d5e !important; }
+/* Dataframe / table */
+.stDataFrame, .stDataFrame [data-testid="stDataFrameResizable"] { color: #fafafa !important; }
+.stDataFrame thead th, .stDataFrame [role="columnheader"] { color: #fafafa !important; background-color: #1a1c24 !important; }
+.stDataFrame tbody td, .stDataFrame [role="gridcell"] { color: #fafafa !important; background-color: #0e1117 !important; }
+.stDataFrame [data-testid="glideDataEditor"],
+.stDataFrame [class*="glideDataEditor"] { background-color: #0e1117 !important; }
+/* Buttons text */
+.stButton button { color: #fafafa !important; }
+/* Container / card borders (e.g. watchlist cards) — match expander style */
+[data-testid="stVerticalBlockBorderWrapper"] {
+    background-color: #1a1c24 !important; border-color: rgba(255,255,255,0.15) !important; border-radius: 8px !important; }
+/* Toggle / checkbox label — global */
+.stToggle label, .stToggle label span, .stToggle label p, .stToggle label div,
+.stToggle [data-testid="stWidgetLabel"], .stToggle [data-testid="stWidgetLabel"] p,
+.stToggle [data-testid="stWidgetLabel"] span, .stToggle [data-testid="stWidgetLabel"] div,
+.stCheckbox label, .stCheckbox label span, .stCheckbox label p,
+[data-testid="stCheckbox"] label span, [data-testid="stCheckbox"] label p { color: #fafafa !important; }
+/* Radio labels (including sidebar theme toggle) */
+.stRadio label, .stRadio label span, .stRadio label p,
+section[data-testid="stSidebar"] .stRadio label,
+section[data-testid="stSidebar"] .stRadio label span,
+section[data-testid="stSidebar"] .stRadio label p { color: #fafafa !important; }
+/* Slider labels & values */
+.stSlider label, .stSlider label span, .stSlider label p,
+.stSlider [data-testid="stTickBarMin"], .stSlider [data-testid="stTickBarMax"],
+.stSlider [data-testid="stThumbValue"] { color: #fafafa !important; }
+/* All widget labels */
+[data-testid="stWidgetLabel"], [data-testid="stWidgetLabel"] p,
+[data-testid="stWidgetLabel"] span, [data-testid="stWidgetLabel"] div { color: #fafafa !important; }
+</style>
+"""
+_active_theme = st.session_state["theme_mode"]
+if _active_theme == "Light":
+    st.markdown(_LIGHT_CSS, unsafe_allow_html=True)
+elif _active_theme == "Dark":
+    st.markdown(_DARK_CSS, unsafe_allow_html=True)
+
 st.sidebar.divider()
 
 # Custom CSS for sidebar navigation buttons
@@ -1178,9 +1389,8 @@ section[data-testid="stSidebar"] .stButton button p {
     width: 100% !important;
 }
 
-/* Hover */
+/* Hover — color set by theme override CSS */
 section[data-testid="stSidebar"] .stButton button:hover {
-    background: rgba(42, 58, 74, 0.6) !important;
     transform: none !important;
 }
 
@@ -1243,6 +1453,23 @@ section[data-testid="stSidebar"] .stElementContainer:has(.logout-marker) + .stEl
     text-align: center !important;
     justify-content: center !important;
 }
+
+/* Theme radio toggle — grey box with compact styling */
+section[data-testid="stSidebar"] .stRadio {
+    background-color: rgba(128, 128, 128, 0.15);
+    border: 1px solid rgba(128, 128, 128, 0.25);
+    border-radius: 8px;
+    padding: 0.3rem 0.5rem;
+    margin-top: 0.2rem;
+}
+section[data-testid="stSidebar"] .stRadio > div {
+    justify-content: center !important;
+    gap: 0.6rem !important;
+}
+section[data-testid="stSidebar"] .stRadio label {
+    font-size: 0.72rem !important;
+    white-space: nowrap !important;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -1279,6 +1506,18 @@ _nav_btn("\u2716  Comparison Analysis", "val_nav_btn",
          "\u2716  Comparison Analysis", match_contains=True)
 _nav_btn("\U0001F4CA  Macro Overview", "macro_nav_btn",
          "\U0001F4CA  Macro Overview", match_contains=True)
+
+# -- Hidden for now --
+# st.sidebar.markdown(
+#     '<div class="nav-section-label" style="font-size:0.85rem; font-weight:600; '
+#     'opacity:0.7;">Valuations</div>',
+#     unsafe_allow_html=True,
+# )
+#
+# _nav_btn("⚖️  Comparable Models", "comp_model_nav_btn",
+#          "⚖️  Comparable Models", match_contains=True)
+# _nav_btn("🧮  DCF Model", "dcf_model_nav_btn",
+#          "🧮  DCF Model", match_contains=True)
 
 page = st.session_state["nav_page"]
 
@@ -1469,7 +1708,7 @@ if "Comparison Analysis" in page:
         def _pct_color(val_str):
             """Return color-coded HTML cell for a % diff value."""
             if val_str == "N/A":
-                return '<td style="text-align:center;padding:6px 10px;color:rgba(255,255,255,0.5);">N/A</td>'
+                return '<td style="text-align:center;padding:6px 10px;opacity:0.4;">N/A</td>'
             pct = float(val_str.replace("%", "").replace("+", ""))
             if pct < -5:
                 clr = "#2ecc71"  # green — well below avg
@@ -1505,7 +1744,7 @@ if "Comparison Analysis" in page:
             _tbl_style = (
                 'style="width:100%;border-collapse:collapse;margin-bottom:0.5rem;"'
             )
-            _th_style = 'style="text-align:center;padding:6px 10px;border-bottom:1px solid rgba(255,255,255,0.15);font-size:0.8rem;opacity:0.7;"'
+            _th_style = 'style="text-align:center;padding:6px 10px;border-bottom:1px solid rgba(128,128,128,0.3);font-size:0.8rem;opacity:0.7;"'
             _tk_style = 'style="padding:6px 10px;font-weight:700;white-space:nowrap;"'
 
             def _build_table(label, key):
@@ -1756,10 +1995,11 @@ if "My Watchlists" in page:
                            gridcolor="rgba(128,128,128,0.2)"),
                 xaxis=dict(showgrid=False),
             )
+            _apply_chart_theme(_dip_fig)
             st.plotly_chart(_dip_fig, use_container_width=True, config=CHART_CFG)
         else:
             st.markdown(
-                '<div style="text-align:center; color:#888; padding:4rem 1rem;">'
+                '<div style="text-align:center; color:rgba(150,150,150,0.85); padding:4rem 1rem;">'
                 'Add tickers to see the Dip Finder chart</div>',
                 unsafe_allow_html=True,
             )
@@ -1815,9 +2055,9 @@ if "My Watchlists" in page:
             if watchlist:
                 # Header row
                 _hLogo, _hTkr, _hPrc, _hErn, _hDel = st.columns([0.6, 2.5, 2, 1.5, 0.5])
-                _hTkr.markdown('<span style="font-size:0.85em; color:#888;">**Ticker**</span>', unsafe_allow_html=True)
-                _hPrc.markdown('<span style="font-size:0.85em; color:#888;">**Price**</span>', unsafe_allow_html=True)
-                _hErn.markdown('<span style="font-size:0.85em; color:#888;">**Earnings**</span>', unsafe_allow_html=True)
+                _hTkr.markdown('<span style="font-size:0.85em; color:rgba(150,150,150,0.85);">**Ticker**</span>', unsafe_allow_html=True)
+                _hPrc.markdown('<span style="font-size:0.85em; color:rgba(150,150,150,0.85);">**Price**</span>', unsafe_allow_html=True)
+                _hErn.markdown('<span style="font-size:0.85em; color:rgba(150,150,150,0.85);">**Earnings**</span>', unsafe_allow_html=True)
 
                 for _idx, item in enumerate(watchlist):
                     _t = item["ticker"]
@@ -1848,7 +2088,7 @@ if "My Watchlists" in page:
                             st.rerun()
                         if _name:
                             st.markdown(
-                                f'<div style="font-size:0.78em; color:#888; margin-top:-10px; '
+                                f'<div style="font-size:0.78em; color:rgba(150,150,150,0.85); margin-top:-10px; '
                                 f'white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">'
                                 f'{_esc(_name)}</div>',
                                 unsafe_allow_html=True,
@@ -1868,7 +2108,7 @@ if "My Watchlists" in page:
                                     f'{_sign}{_chg_pct:.2f}%</span>')
                             st.markdown(_price_html, unsafe_allow_html=True)
                         else:
-                            st.markdown('<span style="color:#888;">N/A</span>', unsafe_allow_html=True)
+                            st.markdown('<span style="color:rgba(150,150,150,0.85);">N/A</span>', unsafe_allow_html=True)
 
                     # Next earnings date
                     with _rErn:
@@ -1883,7 +2123,7 @@ if "My Watchlists" in page:
                             except (ValueError, TypeError):
                                 st.markdown(f'<span style="font-size:0.9em;">{_earn_date}</span>', unsafe_allow_html=True)
                         else:
-                            st.markdown('<span style="color:#888;">\u2014</span>', unsafe_allow_html=True)
+                            st.markdown('<span style="color:rgba(150,150,150,0.85);">\u2014</span>', unsafe_allow_html=True)
 
                     # Delete button
                     with _rDel:
@@ -2044,7 +2284,7 @@ if "Research Notes" in page:
                 indicator = '<span style="color:#E74C3C; font-size:1.2em;">&#9679;</span>'
                 sent_label = "Bearish"
             else:
-                indicator = '<span style="color:#888; font-size:1.2em;">&#9679;</span>'
+                indicator = '<span style="color:rgba(150,150,150,0.85); font-size:1.2em;">&#9679;</span>'
                 sent_label = "Neutral"
 
             nc1, nc2, nc3 = st.columns([6, 1, 1])
@@ -2438,7 +2678,7 @@ if "Macro Overview" in page:
             <div style="overflow-x:auto;">
             <table style="width:100%;border-collapse:collapse;font-size:0.9em;">
             <thead>
-                <tr style="border-bottom:2px solid #555;">
+                <tr style="border-bottom:2px solid rgba(128,128,128,0.4);">
                     <th style="padding:8px 10px;text-align:left;">Date</th>
                     <th style="padding:8px 10px;text-align:left;">Event</th>
                     <th style="padding:8px 10px;text-align:center;">Impact</th>
@@ -2463,6 +2703,397 @@ if "Macro Overview" in page:
                 st.rerun()
     else:
         st.info("No upcoming high-impact U.S. economic events match the selected filters.")
+
+    st.stop()
+
+# ── Page: Comparable Models ───────────────────────────────────────
+
+if "Comparable Models" in page:
+
+    _cm_head, _cm_inp = st.columns([2, 1])
+    with _cm_head:
+        st.markdown("### ⚖️ Comparable Models")
+    with _cm_inp:
+        _cm_input = _sanitize_ticker(st.text_input(
+            "Ticker Symbol", label_visibility="collapsed",
+            placeholder="Ticker Symbol", key="comp_ticker_gate",
+            value=st.session_state.get("active_ticker", ""),
+        ))
+        if _cm_input:
+            st.session_state["active_ticker"] = _cm_input
+
+    if "active_ticker" not in st.session_state or not st.session_state["active_ticker"]:
+        st.info("Enter a ticker symbol above to begin comparable analysis.")
+        st.stop()
+
+    ticker = st.session_state["active_ticker"]
+
+    # ── Peer selection ────────────────────────────────────────────
+    _peer_key = f"val_peers_{ticker}"
+    if _peer_key not in st.session_state:
+        _default_peers = fetch_peers_cached(ticker)[:8]
+        st.session_state[_peer_key] = _default_peers
+
+    peer_tickers = st.session_state[_peer_key]
+
+    _pc1, _pc2 = st.columns([3, 1])
+    with _pc1:
+        _add_peer = _sanitize_ticker(st.text_input(
+            "Add peer ticker", placeholder="e.g. MSFT", key="comp_add_peer",
+            label_visibility="collapsed",
+        ))
+        if _add_peer and _add_peer not in peer_tickers and _add_peer != ticker:
+            st.session_state[_peer_key] = peer_tickers + [_add_peer]
+            st.rerun()
+    with _pc2:
+        if st.button("Reset to Default Peers", key="comp_reset_peers"):
+            st.session_state.pop(_peer_key, None)
+            st.rerun()
+
+    # Peer chips — styled gray boxes with X button
+    if peer_tickers:
+        _remove_cols = st.columns(min(len(peer_tickers), 8))
+        for _i, _p in enumerate(peer_tickers):
+            with _remove_cols[_i % len(_remove_cols)]:
+                st.markdown(
+                    f'<div style="background:rgba(150,150,150,0.15);border:1px solid rgba(150,150,150,0.3);'
+                    f'border-radius:8px;padding:8px 10px;text-align:center;margin-bottom:4px;">'
+                    f'<strong>{_p}</strong></div>',
+                    unsafe_allow_html=True,
+                )
+                if st.button("✕", key=f"comp_rm_{_p}", use_container_width=True):
+                    st.session_state[_peer_key] = [x for x in peer_tickers if x != _p]
+                    st.rerun()
+
+    if not peer_tickers:
+        st.info("No peers found. Add peer tickers above to compare.")
+        st.stop()
+
+    # ── Fetch info for all tickers ────────────────────────────────
+    all_tickers = [ticker] + peer_tickers
+    _infos = {}
+    with st.spinner("Fetching peer data..."):
+        for _t in all_tickers:
+            try:
+                _infos[_t] = fetch_info(_t)
+            except Exception:
+                _infos[_t] = {}
+
+    # ── Shared target info ────────────────────────────────────────
+    import statistics as _comp_stats
+
+    _target_info = _infos.get(ticker, {})
+    _price = _target_info.get("current_price")
+    _mktcap = _target_info.get("market_cap")
+    _total_debt = _target_info.get("total_debt") or 0
+    _total_cash = _target_info.get("total_cash") or 0
+    _shares = _target_info.get("shares_outstanding")
+    _ev = (_mktcap or 0) + _total_debt - _total_cash
+    _net_debt = _total_debt - _total_cash
+    _forward_eps = _target_info.get("forward_eps")
+
+    # ── 5 Bar charts with per-chart implied prices ────────────────
+    _metrics_cfg = [
+        ("P/E (Trailing)", "trailing_pe"),
+        ("Forward P/E", "forward_pe"),
+        ("P/S", "price_to_sales"),
+        ("P/B", "price_to_book"),
+        ("EV/EBITDA", "ev_to_ebitda"),
+    ]
+
+    def _peer_vals(key):
+        return [_infos.get(_p, {}).get(key) for _p in peer_tickers
+                if _infos.get(_p, {}).get(key) is not None and _infos.get(_p, {}).get(key) > 0]
+
+    for _mtitle, _mkey in _metrics_cfg:
+        _vals = [_infos.get(_t, {}).get(_mkey) for _t in all_tickers]
+        fig = _comparison_bar(all_tickers, _vals, COMPARISON_COLORS, _mtitle,
+                              highlight_ticker=ticker)
+        _display_chart(fig, f"comp_{_mkey}", no_logo=True)
+
+        # Per-chart implied price calculation
+        _pv = _peer_vals(_mkey)
+        if _pv and _price:
+            _avg_m = sum(_pv) / len(_pv)
+            _med_m = _comp_stats.median(_pv)
+            _per_share = None
+            _note = None
+            _is_ev = False
+
+            if _mkey == "trailing_pe":
+                if _forward_eps:
+                    _per_share = _forward_eps
+                    _note = "Uses next-year analyst EPS estimate"
+                else:
+                    _tpe = _target_info.get("trailing_pe")
+                    if _tpe and _tpe > 0:
+                        _per_share = _price / _tpe
+            elif _mkey == "forward_pe":
+                _fpe = _target_info.get("forward_pe")
+                if _fpe and _fpe > 0:
+                    _per_share = _price / _fpe
+            elif _mkey == "price_to_sales":
+                _ps = _target_info.get("price_to_sales")
+                if _ps and _ps > 0:
+                    _per_share = _price / _ps
+            elif _mkey == "price_to_book":
+                _pb = _target_info.get("price_to_book")
+                if _pb and _pb > 0:
+                    _per_share = _price / _pb
+            elif _mkey == "ev_to_ebitda":
+                _is_ev = True
+                _eve = _target_info.get("ev_to_ebitda")
+                if _eve and _eve > 0 and _shares and _shares > 0:
+                    _ebitda = _ev / _eve
+                    _per_share = _ebitda  # store EBITDA for EV calc
+
+            if _per_share is not None:
+                if _is_ev and _shares and _shares > 0:
+                    _impl_avg = (_avg_m * _per_share - _net_debt) / _shares
+                    _impl_med = (_med_m * _per_share - _net_debt) / _shares
+                elif not _is_ev:
+                    _impl_avg = _avg_m * _per_share
+                    _impl_med = _med_m * _per_share
+                else:
+                    _impl_avg = None
+                    _impl_med = None
+
+                if _impl_avg is not None:
+                    _ic1, _ic2 = st.columns(2)
+                    with _ic1:
+                        st.html(
+                            f'<span style="font-size:0.95em;">'
+                            f'<b>Implied Price (Avg):</b> ${_impl_avg:,.2f} &nbsp;|&nbsp; '
+                            f'<b>Implied Price (Med):</b> ${_impl_med:,.2f}</span>'
+                        )
+                    with _ic2:
+                        _custom = st.number_input(
+                            "Custom Multiple", value=round(_med_m, 2),
+                            min_value=0.0, step=0.5, format="%.2f",
+                            key=f"comp_custom_{_mkey}",
+                        )
+                        if _is_ev and _shares and _shares > 0:
+                            _impl_custom = (_custom * _per_share - _net_debt) / _shares
+                        else:
+                            _impl_custom = _custom * _per_share
+                        st.html(
+                            f'<span style="font-size:0.95em;">'
+                            f'<b>Implied Price (Custom):</b> ${_impl_custom:,.2f}</span>'
+                        )
+                    if _note:
+                        st.caption(_note)
+                    st.caption(f"Implied prices are for {ticker}")
+
+    # ── Implied value table ──────────────────────────────────────
+    st.markdown("#### Implied Share Price from Peer Multiples")
+
+    _rows = []
+
+    # P/E — use next-year analyst EPS if available
+    _pv = _peer_vals("trailing_pe")
+    if _pv and _price:
+        _eps = None
+        if _forward_eps:
+            _eps = _forward_eps
+        else:
+            _tpe = _target_info.get("trailing_pe")
+            if _tpe and _tpe > 0:
+                _eps = _price / _tpe
+        if _eps:
+            _avg, _med = sum(_pv) / len(_pv), _comp_stats.median(_pv)
+            _rows.append({"Multiple": "P/E", "Peer Avg": f"{_avg:.2f}", "Peer Median": f"{_med:.2f}",
+                           "Implied (Avg)": f"${_avg * _eps:.2f}", "Implied (Med)": f"${_med * _eps:.2f}"})
+
+    # Forward P/E
+    _pv = _peer_vals("forward_pe")
+    _fpe = _target_info.get("forward_pe")
+    if _pv and _fpe and _price and _fpe > 0:
+        _feps = _price / _fpe
+        _avg, _med = sum(_pv) / len(_pv), _comp_stats.median(_pv)
+        _rows.append({"Multiple": "Forward P/E", "Peer Avg": f"{_avg:.2f}", "Peer Median": f"{_med:.2f}",
+                       "Implied (Avg)": f"${_avg * _feps:.2f}", "Implied (Med)": f"${_med * _feps:.2f}"})
+
+    # P/S
+    _pv = _peer_vals("price_to_sales")
+    _ps = _target_info.get("price_to_sales")
+    if _pv and _ps and _price and _ps > 0:
+        _rev_ps = _price / _ps
+        _avg, _med = sum(_pv) / len(_pv), _comp_stats.median(_pv)
+        _rows.append({"Multiple": "P/S", "Peer Avg": f"{_avg:.2f}", "Peer Median": f"{_med:.2f}",
+                       "Implied (Avg)": f"${_avg * _rev_ps:.2f}", "Implied (Med)": f"${_med * _rev_ps:.2f}"})
+
+    # P/B
+    _pv = _peer_vals("price_to_book")
+    _pb = _target_info.get("price_to_book")
+    if _pv and _pb and _price and _pb > 0:
+        _book_ps = _price / _pb
+        _avg, _med = sum(_pv) / len(_pv), _comp_stats.median(_pv)
+        _rows.append({"Multiple": "P/B", "Peer Avg": f"{_avg:.2f}", "Peer Median": f"{_med:.2f}",
+                       "Implied (Avg)": f"${_avg * _book_ps:.2f}", "Implied (Med)": f"${_med * _book_ps:.2f}"})
+
+    # EV/EBITDA
+    _pv = _peer_vals("ev_to_ebitda")
+    _ev_ebitda = _target_info.get("ev_to_ebitda")
+    if _pv and _ev_ebitda and _ev_ebitda > 0 and _shares and _shares > 0:
+        _ebitda = _ev / _ev_ebitda
+        _avg, _med = sum(_pv) / len(_pv), _comp_stats.median(_pv)
+        _impl_avg = (_avg * _ebitda - _net_debt) / _shares
+        _impl_med = (_med * _ebitda - _net_debt) / _shares
+        _rows.append({"Multiple": "EV/EBITDA", "Peer Avg": f"{_avg:.2f}", "Peer Median": f"{_med:.2f}",
+                       "Implied (Avg)": f"${_impl_avg:.2f}", "Implied (Med)": f"${_impl_med:.2f}"})
+
+    if _rows:
+        import pandas as pd
+        st.dataframe(pd.DataFrame(_rows).set_index("Multiple"), use_container_width=True)
+        st.caption("P/E implied prices use next-year analyst EPS estimate")
+    else:
+        st.info("Insufficient data to compute implied values.")
+
+    if _price:
+        st.markdown(f"**Current Price:** ${_price:,.2f}")
+
+    st.stop()
+
+# ── Page: DCF Model ──────────────────────────────────────────────
+
+if "DCF Model" in page:
+
+    # Ticker gate
+    if "active_ticker" not in st.session_state:
+        st.markdown("<div style='height: 15vh;'></div>", unsafe_allow_html=True)
+        _left, _mid, _right = st.columns([1, 2, 1])
+        with _mid:
+            _dcf_input = _sanitize_ticker(st.text_input(
+                "Ticker Symbol", label_visibility="collapsed",
+                placeholder="Ticker Symbol", key="dcf_ticker_gate",
+            ))
+            st.caption("Input a Ticker and Press Enter to Analyze")
+            if _dcf_input:
+                st.session_state["active_ticker"] = _dcf_input
+                st.rerun()
+        st.stop()
+
+    ticker = st.session_state["active_ticker"]
+    st.markdown("### 🧮 DCF Model")
+
+    # ── Big numbers: DCF vs Price ─────────────────────────────────
+    _dcf_data = fetch_dcf_cached(ticker)
+    _dcf_val = _dcf_data.get("dcf")
+    _dcf_price = _dcf_data.get("Stock Price") or _dcf_data.get("stockPrice")
+
+    if _dcf_val and _dcf_price:
+        _upside = ((_dcf_val - _dcf_price) / _dcf_price) * 100
+        _color = "#2ECC71" if _upside >= 0 else "#E74C3C"
+        _arrow = "▲" if _upside >= 0 else "▼"
+
+        _d1, _d2, _d3 = st.columns(3)
+        with _d1:
+            st.metric("DCF Intrinsic Value", f"${_dcf_val:,.2f}")
+        with _d2:
+            st.metric("Current Price", f"${_dcf_price:,.2f}")
+        with _d3:
+            st.markdown(
+                f'<div style="text-align:center; padding-top:0.5rem;">'
+                f'<span style="font-size:0.85rem; opacity:0.7;">Upside / Downside</span><br>'
+                f'<span style="font-size:1.8rem; font-weight:700; color:{_color};">'
+                f'{_arrow} {abs(_upside):.1f}%</span></div>',
+                unsafe_allow_html=True,
+            )
+    else:
+        st.info("DCF data not available for this ticker.")
+
+    # ── WACC breakdown ───────────────────────────────────────────
+    _lev = fetch_levered_dcf_cached(ticker)
+    if _lev:
+        st.markdown("#### WACC Breakdown")
+        _wacc_fields = [
+            ("Cost of Equity", "costOfEquity"),
+            ("Cost of Debt", "costOfDebt"),
+            ("WACC", "wacc"),
+            ("Beta", "beta"),
+            ("Risk-Free Rate", "riskFreeRate"),
+            ("Market Risk Premium", "marketRiskPremium"),
+            ("Terminal Growth Rate", "longTermGrowthRate"),
+            ("Tax Rate", "taxRate"),
+        ]
+        _w1, _w2, _w3, _w4 = st.columns(4)
+        _wcols = [_w1, _w2, _w3, _w4]
+        for _wi, (_wlabel, _wkey) in enumerate(_wacc_fields):
+            _wval = _lev.get(_wkey)
+            with _wcols[_wi % 4]:
+                if _wval is not None:
+                    if _wkey == "beta":
+                        st.metric(_wlabel, f"{_wval:.2f}")
+                    else:
+                        st.metric(_wlabel, f"{_wval * 100:.2f}%" if abs(_wval) < 1 else f"{_wval:.2f}%")
+                else:
+                    st.metric(_wlabel, "N/A")
+
+    # ── Historical DCF vs Price chart ────────────────────────────
+    _hist = fetch_hist_dcf_cached(ticker)
+    if _hist:
+        _hist_sorted = sorted(_hist, key=lambda x: x.get("date", ""))
+        _dates = [h.get("date", "")[:10] for h in _hist_sorted]
+        _dcf_vals = [h.get("dcf") for h in _hist_sorted]
+        _stock_vals = [h.get("Stock Price") or h.get("stockPrice") for h in _hist_sorted]
+
+        _traces = [
+            {"name": "DCF Value", "values": _dcf_vals, "color": "#2ECC71"},
+            {"name": "Stock Price", "values": _stock_vals, "color": "#4A90D9"},
+        ]
+        fig = _multi_line(_dates, _traces, "Historical DCF vs Stock Price", prefix="$", suffix="")
+        _display_chart(fig, "dcf_hist_chart", no_logo=True)
+
+    # ── Custom DCF toggle ────────────────────────────────────────
+    _custom_on = st.toggle("Custom DCF Assumptions", value=False, key="dcf_custom_toggle")
+
+    if _custom_on:
+        _sc1, _sc2 = st.columns(2)
+        with _sc1:
+            _rev_growth = st.slider("Revenue Growth %", -20, 50, 10, key="dcf_rev_growth")
+            _ebitda_margin = st.slider("EBITDA Margin %", 0, 60, 20, key="dcf_ebitda_margin")
+            _capex_pct = st.slider("CapEx %", 0, 30, 5, key="dcf_capex")
+        with _sc2:
+            _discount_rate = st.slider("Discount Rate %", 4, 20, 10, key="dcf_discount")
+            _term_growth = st.slider("Terminal Growth %", 0.0, 5.0, 2.5, step=0.1, key="dcf_term_growth")
+            _tax_rate = st.slider("Tax Rate %", 0, 40, 21, key="dcf_tax_rate")
+
+        if st.button("Run Custom DCF", key="dcf_run_custom", type="primary"):
+            with st.spinner("Running custom DCF..."):
+                _custom_result = fetch_custom_dcf(
+                    ticker,
+                    revenueGrowthPct=_rev_growth / 100,
+                    ebitdaPct=_ebitda_margin / 100,
+                    longTermGrowthRate=_term_growth / 100,
+                    taxRate=_tax_rate / 100,
+                    capitalExpenditurePct=_capex_pct / 100,
+                    costOfEquity=_discount_rate / 100,
+                    costOfDebt=_discount_rate / 100 * 0.7,
+                )
+            if _custom_result:
+                _cdcf = _custom_result.get("dcf") or _custom_result.get("enterpriseValue")
+                _cprice = _custom_result.get("Stock Price") or _custom_result.get("stockPrice") or _dcf_price
+                if _cdcf and _cprice:
+                    _cupside = ((_cdcf - _cprice) / _cprice) * 100
+                    _ccolor = "#2ECC71" if _cupside >= 0 else "#E74C3C"
+                    _carrow = "▲" if _cupside >= 0 else "▼"
+                    _cc1, _cc2, _cc3 = st.columns(3)
+                    with _cc1:
+                        st.metric("Custom DCF Value", f"${_cdcf:,.2f}")
+                    with _cc2:
+                        st.metric("Current Price", f"${_cprice:,.2f}")
+                    with _cc3:
+                        st.markdown(
+                            f'<div style="text-align:center; padding-top:0.5rem;">'
+                            f'<span style="font-size:0.85rem; opacity:0.7;">Upside / Downside</span><br>'
+                            f'<span style="font-size:1.8rem; font-weight:700; color:{_ccolor};">'
+                            f'{_carrow} {abs(_cupside):.1f}%</span></div>',
+                            unsafe_allow_html=True,
+                        )
+                else:
+                    st.warning("Custom DCF returned no valuation result.")
+            else:
+                st.warning("Custom DCF returned no data. The API may not support this ticker.")
 
     st.stop()
 
@@ -2753,19 +3384,26 @@ with st.expander("Key Fundamental Metrics", expanded=True):
         background: rgba(46, 204, 113, 0.3) !important;
         box-shadow: none !important;
     }
+    /* Grey shaded box around time-period toggles */
+    [data-testid="stVerticalBlockBorderWrapper"] {
+        background-color: rgba(128, 128, 128, 0.12) !important;
+        border-radius: 10px !important;
+    }
     </style>
     """, unsafe_allow_html=True)
 
     st.session_state.setdefault("metrics_mode_sel", "Annual")
     _, _toggle_col, _ = st.columns([2, 3, 2])
     with _toggle_col:
-        _tc = st.columns(3)
-        for _i, _label in enumerate(["Annual", "TTM", "Quarterly"]):
-            with _tc[_i]:
-                _btn_type = "primary" if st.session_state["metrics_mode_sel"] == _label else "secondary"
-                if st.button(_label, key=f"mode_{_label}", width="stretch", type=_btn_type):
-                    st.session_state["metrics_mode_sel"] = _label
-                    st.rerun()
+        _metrics_toggle_box = st.container(border=True)
+        with _metrics_toggle_box:
+            _tc = st.columns(3)
+            for _i, _label in enumerate(["Annual", "TTM", "Quarterly"]):
+                with _tc[_i]:
+                    _btn_type = "primary" if st.session_state["metrics_mode_sel"] == _label else "secondary"
+                    if st.button(_label, key=f"mode_{_label}", width="stretch", type=_btn_type):
+                        st.session_state["metrics_mode_sel"] = _label
+                        st.rerun()
     mode = st.session_state["metrics_mode_sel"]
     mode_key = mode.lower()
 
@@ -2783,7 +3421,7 @@ with st.expander("Key Fundamental Metrics", expanded=True):
 
         def vals(row):
             if row in metrics.index:
-                return metrics.loc[row][dates].tolist()
+                return metrics.loc[row].iloc[::-1].tolist()
             return [0] * len(dates)
 
         # Ratio chart dates/vals (TTM when quarterly, otherwise same as main)
@@ -2791,11 +3429,45 @@ with st.expander("Key Fundamental Metrics", expanded=True):
 
         def _ratio_vals(row):
             if _ratio_metrics is not None and not _ratio_metrics.empty and row in _ratio_metrics.index:
-                return _ratio_metrics.loc[row][_ratio_dates].tolist()
+                s = _ratio_metrics.loc[row]
+                # Use positional reversal (oldest→newest) instead of label
+                # indexing, which can break when the dialog closure captures
+                # stale column names after a mode change.
+                return s.iloc[::-1].tolist()
             return [0] * len(_ratio_dates)
 
         _ratio_mode = "ttm" if mode_key == "quarterly" else mode_key
         _ratio_suffix = " (TTM)" if mode_key == "quarterly" else ""
+
+        def _fresh_main_data():
+            """Re-derive main metrics data from cached fetchers so fullscreen
+            builders never rely on stale closure variables."""
+            mk = st.session_state.get("metrics_mode_sel", "Annual").lower()
+            m = fetch_metrics(ticker, mk)
+            if m is None or m.empty:
+                return [], lambda row: [0]
+            d = list(m.columns[::-1])
+            def v(row):
+                if row in m.index:
+                    return m.loc[row].iloc[::-1].tolist()
+                return [0] * len(d)
+            return d, v
+
+        def _fresh_ratio_data():
+            """Re-derive ratio data from cached fetchers so fullscreen
+            builders never rely on stale closure variables."""
+            mk = st.session_state.get("metrics_mode_sel", "Annual").lower()
+            rm = fetch_metrics(ticker, "ttm") if mk == "quarterly" else fetch_metrics(ticker, mk)
+            if rm is None or rm.empty:
+                return [], lambda row: [], "annual", ""
+            rd = list(rm.columns[::-1])
+            def rv(row):
+                if row in rm.index:
+                    return rm.loc[row].iloc[::-1].tolist()
+                return [0] * len(rd)
+            r_mode = "ttm" if mk == "quarterly" else mk
+            r_suffix = " (TTM)" if mk == "quarterly" else ""
+            return rd, rv, r_mode, r_suffix
 
         # Income Statement
         st.markdown("**Income Statement**")
@@ -2808,45 +3480,48 @@ with st.expander("Key Fundamental Metrics", expanded=True):
             show_opex = st.toggle("Show OpEx", key="show_opex")
         # Builder closures for charts with toggles
         def _build_revenue():
+            d, v = _fresh_main_data()
             if st.session_state.get("show_cogs"):
                 fig = _bar_with_line(
-                    dates, vals("Revenue ($M)"), vals("COGS ($M)"),
+                    d, v("Revenue ($M)"), v("COGS ($M)"),
                     title="Revenue & COGS", bar_color="#D35400", line_color="#8B0000", auto_scale=True,
                 )
-                sd = [{"name": "Revenue", "values": vals("Revenue ($M)")},
-                      {"name": "COGS", "values": vals("COGS ($M)")}]
+                sd = [{"name": "Revenue", "values": v("Revenue ($M)")},
+                      {"name": "COGS", "values": v("COGS ($M)")}]
             else:
-                fig = _bar(dates, vals("Revenue ($M)"), "Revenue", auto_scale=True, color="#D35400")
-                sd = [{"name": "Revenue", "values": vals("Revenue ($M)")}]
+                fig = _bar(d, v("Revenue ($M)"), "Revenue", auto_scale=True, color="#D35400")
+                sd = [{"name": "Revenue", "values": v("Revenue ($M)")}]
             return fig, sd
 
         def _build_eps():
+            d, v = _fresh_main_data()
             if st.session_state.get("show_basic_eps"):
                 fig = _bar_with_line(
-                    dates, vals("Diluted EPS ($)"), vals("Basic EPS ($)"),
+                    d, v("Diluted EPS ($)"), v("Basic EPS ($)"),
                     title="EPS", bar_name="EPS", line_name="Undiluted",
                     bar_color="#D4AC0D", line_color="#2ECC71", prefix="$", suffix="", auto_scale=False,
                 )
-                sd = [{"name": "EPS", "values": vals("Diluted EPS ($)")},
-                      {"name": "Undiluted EPS", "values": vals("Basic EPS ($)")}]
+                sd = [{"name": "EPS", "values": v("Diluted EPS ($)")},
+                      {"name": "Undiluted EPS", "values": v("Basic EPS ($)")}]
             else:
-                fig = _bar(dates, vals("Diluted EPS ($)"), "EPS",
+                fig = _bar(d, v("Diluted EPS ($)"), "EPS",
                            prefix="$", suffix="", decimals=2, color="#D4AC0D")
-                sd = [{"name": "EPS", "values": vals("Diluted EPS ($)")}]
+                sd = [{"name": "EPS", "values": v("Diluted EPS ($)")}]
             return fig, sd
 
         def _build_op_income():
+            d, v = _fresh_main_data()
             if st.session_state.get("show_opex"):
                 fig = _bar_with_line(
-                    dates, vals("Operating Income ($M)"), vals("Operating Expenses ($M)"),
+                    d, v("Operating Income ($M)"), v("Operating Expenses ($M)"),
                     title="Operating Income & OpEx", bar_name="Op. Income",
                     line_name="OpEx", line_color="#E74C3C", auto_scale=True,
                 )
-                sd = [{"name": "Operating Income", "values": vals("Operating Income ($M)")},
-                      {"name": "Operating Expenses", "values": vals("Operating Expenses ($M)")}]
+                sd = [{"name": "Operating Income", "values": v("Operating Income ($M)")},
+                      {"name": "Operating Expenses", "values": v("Operating Expenses ($M)")}]
             else:
-                fig = _bar(dates, vals("Operating Income ($M)"), "Operating Income", auto_scale=True)
-                sd = [{"name": "Operating Income", "values": vals("Operating Income ($M)")}]
+                fig = _bar(d, v("Operating Income ($M)"), "Operating Income", auto_scale=True)
+                sd = [{"name": "Operating Income", "values": v("Operating Income ($M)")}]
             return fig, sd
 
         c1, c2, c3 = st.columns(3)
@@ -2868,11 +3543,12 @@ with st.expander("Key Fundamental Metrics", expanded=True):
 
         # EBITDA & Expenses row
         def _build_ebitda():
+            d, v = _fresh_main_data()
             if st.session_state.get("show_ebitda_breakdown"):
                 fig = _stacked_bar(
-                    dates,
-                    bottom_vals=vals("EBIT ($M)"),
-                    top_vals=vals("D&A ($M)"),
+                    d,
+                    bottom_vals=v("EBIT ($M)"),
+                    top_vals=v("D&A ($M)"),
                     bottom_name="EBIT",
                     top_name="D&A",
                     bottom_color="#00BCD4",
@@ -2880,11 +3556,11 @@ with st.expander("Key Fundamental Metrics", expanded=True):
                     title="EBITDA Breakdown",
                     auto_scale=True,
                 )
-                sd = [{"name": "EBIT", "values": vals("EBIT ($M)")},
-                      {"name": "D&A", "values": vals("D&A ($M)")}]
+                sd = [{"name": "EBIT", "values": v("EBIT ($M)")},
+                      {"name": "D&A", "values": v("D&A ($M)")}]
             else:
-                fig = _bar(dates, vals("EBITDA ($M)"), "EBITDA", auto_scale=True, color="#00BCD4")
-                sd = [{"name": "EBITDA", "values": vals("EBITDA ($M)")}]
+                fig = _bar(d, v("EBITDA ($M)"), "EBITDA", auto_scale=True, color="#00BCD4")
+                sd = [{"name": "EBITDA", "values": v("EBITDA ($M)")}]
             return fig, sd
 
         _te1, _te2 = st.columns(2)
@@ -2932,27 +3608,33 @@ with st.expander("Key Fundamental Metrics", expanded=True):
         sbc_vals = vals("SBC ($M)")
 
         def _build_ocf():
+            d, v = _fresh_main_data()
+            _sh = v("Shares Outstanding (M)")
             if st.session_state.get("cf_per_share"):
-                ocf_ps = [o / s if s else 0 for o, s in zip(vals("OCF ($M)"), shares_vals)]
-                fig = _bar(dates, ocf_ps, "OCF / Share", prefix="$", suffix="", decimals=2)
+                ocf_ps = [o / s if s else 0 for o, s in zip(v("OCF ($M)"), _sh)]
+                fig = _bar(d, ocf_ps, "OCF / Share", prefix="$", suffix="", decimals=2)
                 sd = [{"name": "OCF/Share", "values": ocf_ps}]
             else:
-                fig = _bar(dates, vals("OCF ($M)"), "Operating Cash Flow", auto_scale=True)
-                sd = [{"name": "OCF", "values": vals("OCF ($M)")}]
+                fig = _bar(d, v("OCF ($M)"), "Operating Cash Flow", auto_scale=True)
+                sd = [{"name": "OCF", "values": v("OCF ($M)")}]
             return fig, sd
 
         def _build_fcf():
+            d, v = _fresh_main_data()
+            _sh = v("Shares Outstanding (M)")
+            _fcf = v("FCF ($M)")
+            _sbc = v("SBC ($M)")
             ps = st.session_state.get("cf_per_share")
             adj = st.session_state.get("cf_adjust_sbc")
             if ps:
-                fcf_ps = [f / s if s else 0 for f, s in zip(fcf_vals, shares_vals)]
-                sbc_ps = [b / s if s else 0 for b, s in zip(sbc_vals, shares_vals)]
+                fcf_ps = [f / s if s else 0 for f, s in zip(_fcf, _sh)]
+                sbc_ps = [b / s if s else 0 for b, s in zip(_sbc, _sh)]
                 if adj:
                     fcf_adj_ps = [f - b for f, b in zip(fcf_ps, sbc_ps)]
-                    fig = _bar(dates, fcf_adj_ps, "FCF Adj. / Share", prefix="$", suffix="", decimals=2, color="#145A32")
+                    fig = _bar(d, fcf_adj_ps, "FCF Adj. / Share", prefix="$", suffix="", decimals=2, color="#145A32")
                     sd = [{"name": "FCF Adj./Share", "values": fcf_adj_ps}]
                 else:
-                    fig = _grouped_bar(dates, [
+                    fig = _grouped_bar(d, [
                         {"name": "FCF/Share", "values": fcf_ps, "color": "#1E8449"},
                         {"name": "SBC/Share", "values": sbc_ps, "color": "#E74C3C"},
                     ], "FCF & SBC / Share", suffix="")
@@ -2960,16 +3642,16 @@ with st.expander("Key Fundamental Metrics", expanded=True):
                           {"name": "SBC/Share", "values": sbc_ps}]
             else:
                 if adj:
-                    fcf_adj = [f - b for f, b in zip(fcf_vals, sbc_vals)]
-                    fig = _bar(dates, fcf_adj, "FCF Adj.", auto_scale=True, color="#145A32")
+                    fcf_adj = [f - b for f, b in zip(_fcf, _sbc)]
+                    fig = _bar(d, fcf_adj, "FCF Adj.", auto_scale=True, color="#145A32")
                     sd = [{"name": "FCF Adj.", "values": fcf_adj}]
                 else:
-                    fig = _grouped_bar(dates, [
-                        {"name": "FCF", "values": fcf_vals, "color": "#1E8449"},
-                        {"name": "SBC", "values": sbc_vals, "color": "#E74C3C"},
+                    fig = _grouped_bar(d, [
+                        {"name": "FCF", "values": _fcf, "color": "#1E8449"},
+                        {"name": "SBC", "values": _sbc, "color": "#E74C3C"},
                     ], "FCF & SBC", auto_scale=True)
-                    sd = [{"name": "FCF", "values": fcf_vals},
-                          {"name": "SBC", "values": sbc_vals}]
+                    sd = [{"name": "FCF", "values": _fcf},
+                          {"name": "SBC", "values": _sbc}]
             return fig, sd
 
         _cf_t1, _cf_t2 = st.columns(2)
@@ -3023,22 +3705,24 @@ with st.expander("Key Fundamental Metrics", expanded=True):
             show = st.session_state.get("liq_avg", False)
             period = st.session_state.get("liq_avg_period", "All")
             avg_years = _AVG_PERIOD_MAP.get(period)
-            fig = _multi_line_with_avg(_ratio_dates, [
-                {"name": "Current", "values": _ratio_vals("Current Ratio"), "color": "#2ECC71"},
-                {"name": "Cash", "values": _ratio_vals("Cash Ratio"), "color": "#1ABC9C"},
-            ], f"Liquidity Ratios{_ratio_suffix}", suffix="x", show_avg=show,
-               avg_years=avg_years, mode=_ratio_mode)
+            rd, rv, r_mode, r_suffix = _fresh_ratio_data()
+            fig = _multi_line_with_avg(rd, [
+                {"name": "Current", "values": rv("Current Ratio"), "color": "#2ECC71"},
+                {"name": "Cash", "values": rv("Cash Ratio"), "color": "#1ABC9C"},
+            ], f"Liquidity Ratios{r_suffix}", suffix="x", show_avg=show,
+               avg_years=avg_years, mode=r_mode)
             return fig
 
         def _build_solvency():
             show = st.session_state.get("solv_avg", False)
             period = st.session_state.get("solv_avg_period", "All")
             avg_years = _AVG_PERIOD_MAP.get(period)
-            fig = _multi_line_with_avg(_ratio_dates, [
-                {"name": "D/A", "values": _ratio_vals("D/A (%)"), "color": "#E74C3C"},
-                {"name": "D/E", "values": _ratio_vals("D/E (%)"), "color": "#C0392B"},
-            ], f"Solvency Ratios{_ratio_suffix}", suffix="%", show_avg=show,
-               avg_years=avg_years, mode=_ratio_mode)
+            rd, rv, r_mode, r_suffix = _fresh_ratio_data()
+            fig = _multi_line_with_avg(rd, [
+                {"name": "D/A", "values": rv("D/A (%)"), "color": "#E74C3C"},
+                {"name": "D/E", "values": rv("D/E (%)"), "color": "#C0392B"},
+            ], f"Solvency Ratios{r_suffix}", suffix="%", show_avg=show,
+               avg_years=avg_years, mode=r_mode)
             return fig
 
         c1, c2 = st.columns(2)
@@ -3070,10 +3754,14 @@ with st.expander("Key Fundamental Metrics", expanded=True):
             show = st.session_state.get("icr_avg", False)
             period = st.session_state.get("icr_avg_period", "All")
             avg_years = _AVG_PERIOD_MAP.get(period)
-            fig = _multi_line_with_avg(_icr_dates, [
-                {"name": "Interest Coverage", "values": _icr_vals, "color": "#9B59B6"},
-            ], f"Interest Coverage Ratio{_ratio_suffix}", suffix="x", show_avg=show,
-               avg_years=avg_years, mode=_ratio_mode)
+            rd, rv, r_mode, r_suffix = _fresh_ratio_data()
+            icr_max = 10 if r_mode == "annual" else 40
+            icr_d = rd[-icr_max:]
+            icr_v = rv("Interest Coverage")[-icr_max:]
+            fig = _multi_line_with_avg(icr_d, [
+                {"name": "Interest Coverage", "values": icr_v, "color": "#9B59B6"},
+            ], f"Interest Coverage Ratio{r_suffix}", suffix="x", show_avg=show,
+               avg_years=avg_years, mode=r_mode)
             return fig
 
         show_icr_avg = st.toggle("Show Average", key="icr_avg")
@@ -3116,13 +3804,15 @@ with st.expander("Historical Multiples", expanded=False):
     st.session_state.setdefault("multiples_mode_sel", "Annual")
     _, _mtoggle_col, _ = st.columns([2, 3, 2])
     with _mtoggle_col:
-        _mtc = st.columns(2)
-        for _mi, _mlabel in enumerate(["Annual", "TTM"]):
-            with _mtc[_mi]:
-                _mbtn_type = "primary" if st.session_state["multiples_mode_sel"] == _mlabel else "secondary"
-                if st.button(_mlabel, key=f"mult_mode_{_mlabel}", width="stretch", type=_mbtn_type):
-                    st.session_state["multiples_mode_sel"] = _mlabel
-                    st.rerun()
+        _mult_toggle_box = st.container(border=True)
+        with _mult_toggle_box:
+            _mtc = st.columns(2)
+            for _mi, _mlabel in enumerate(["Annual", "TTM"]):
+                with _mtc[_mi]:
+                    _mbtn_type = "primary" if st.session_state["multiples_mode_sel"] == _mlabel else "secondary"
+                    if st.button(_mlabel, key=f"mult_mode_{_mlabel}", width="stretch", type=_mbtn_type):
+                        st.session_state["multiples_mode_sel"] = _mlabel
+                        st.rerun()
     _mult_mode = st.session_state["multiples_mode_sel"]
     _chart_mode = "ttm" if _mult_mode == "TTM" else "annual"
 
@@ -3132,7 +3822,7 @@ with st.expander("Historical Multiples", expanded=False):
 
         def _ratio_vals_all(row):
             if row in _ratios.index:
-                return _ratios.loc[row][_ratio_dates_all].tolist()
+                return _ratios.loc[row].iloc[::-1].tolist()
             return [0] * len(_ratio_dates_all)
 
         _TF_MAP = {"3Y": 3, "5Y": 5, "10Y": 10}
@@ -3172,18 +3862,18 @@ with st.expander("Historical Multiples", expanded=False):
         _fwd_dates_curr = _fwd_dates + ["Current"]
 
         _MULT_CHARTS = [
-            ("P/E Ratio", "P/E Ratio", "hist_pe", "mult_stats_pe"),
-            ("P/S Ratio", "P/S Ratio", "hist_ps", "mult_stats_ps"),
-            ("P/B Ratio", "P/B Ratio", "hist_pb", "mult_stats_pb"),
-            ("EV/EBITDA", "EV/EBITDA", "hist_ev_ebitda", "mult_stats_ev"),
+            ("P/E Ratio", "P/E Ratio", "hist_pe", "mult_stats_pe", "#3498DB"),
+            ("P/S Ratio", "P/S Ratio", "hist_ps", "mult_stats_ps", "#C0392B"),
+            ("P/B Ratio", "P/B Ratio", "hist_pb", "mult_stats_pb", "#7B4F2A"),
+            ("EV/EBITDA", "EV/EBITDA", "hist_ev_ebitda", "mult_stats_ev", "#00BCD4"),
         ]
 
-        def _make_mult_builder(row_name, title, toggle_key):
+        def _make_mult_builder(row_name, title, toggle_key, color="#3498DB"):
             def _builder():
                 show = st.session_state.get(toggle_key, False)
                 return _multiples_line(_ratio_dates_curr,
                                        _ratio_vals_with_current(row_name),
-                                       title, show_stats=show)
+                                       title, show_stats=show, color=color)
             return _builder
 
         _fwd_pe_title = "Forward P/E (Annual)" if _mult_mode == "TTM" else "Forward P/E"
@@ -3191,7 +3881,7 @@ with st.expander("Historical Multiples", expanded=False):
         def _build_fwd_pe():
             show = st.session_state.get("mult_stats_fwd_pe", False)
             return _multiples_line(_fwd_dates_curr, _fwd_pe_vals_curr,
-                                   _fwd_pe_title, show_stats=show)
+                                   _fwd_pe_title, show_stats=show, color="#1A5276")
 
         # Row 1: P/E | Forward P/E
         c1, c2 = st.columns(2)
@@ -3213,11 +3903,11 @@ with st.expander("Historical Multiples", expanded=False):
 
         # Row 2: P/S | P/B
         c1, c2 = st.columns(2)
-        for col, (row_name, title, chart_key, toggle_key) in zip(
+        for col, (row_name, title, chart_key, toggle_key, color) in zip(
                 [c1, c2], [_MULT_CHARTS[1], _MULT_CHARTS[2]]):
             with col:
                 st.toggle("Show Median & Average", key=toggle_key)
-                builder = _make_mult_builder(row_name, title, toggle_key)
+                builder = _make_mult_builder(row_name, title, toggle_key, color=color)
                 fig = builder()
                 _display_chart(fig, chart_key, mode=_chart_mode,
                                toggles=[{"label": "Show Median & Average",
@@ -3226,7 +3916,7 @@ with st.expander("Historical Multiples", expanded=False):
 
         # Row 3: EV/EBITDA (full width)
         st.toggle("Show Median & Average", key="mult_stats_ev")
-        _ev_builder = _make_mult_builder("EV/EBITDA", "EV/EBITDA", "mult_stats_ev")
+        _ev_builder = _make_mult_builder("EV/EBITDA", "EV/EBITDA", "mult_stats_ev", color="#00BCD4")
         fig = _ev_builder()
         _display_chart(fig, "hist_ev_ebitda", mode=_chart_mode,
                        toggles=[{"label": "Show Median & Average",
