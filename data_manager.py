@@ -65,6 +65,12 @@ class DataProvider(ABC):
     def get_price_history(self, ticker: str, period: str = "3y") -> pd.DataFrame:
         """Return historical price data (Date, Open, High, Low, Close, Volume)."""
 
+    @abstractmethod
+    def get_historical_ratios(self, ticker: str, mode: str = "annual") -> pd.DataFrame:
+        """Return a DataFrame of historical valuation ratios.
+        mode: 'annual' | 'quarterly'
+        Columns = period labels, rows = ratio names."""
+
     def get_quote(self, ticker: str) -> dict:
         """Return real-time quote data (price, change, open, previous close)."""
         return {}
@@ -528,6 +534,7 @@ class FMPProvider(DataProvider):
 
         raw_revenue = inc.get("revenue") or 0
         raw_op_income = inc.get("operatingIncome") or 0
+        interest_expense_raw = inc.get("interestExpense") or 0
         raw_ebitda = inc.get("ebitda") or 0
         basic_eps = inc.get("eps")
         op_expenses = (inc.get("operatingExpenses") or 0) / M
@@ -568,6 +575,7 @@ class FMPProvider(DataProvider):
             "G&A ($M)": round(ga, 1),
             "S&M ($M)": round(sm, 1),
             "CAPEX ($M)": round(capex, 1),
+            "Interest Coverage": safe_div(raw_op_income, interest_expense_raw),
         }
 
     def _ttm_metrics(self, ticker: str) -> pd.DataFrame:
@@ -658,6 +666,7 @@ class FMPProvider(DataProvider):
                     return round(num / den, 2)
                 return float("nan")
 
+            int_exp_ttm = flow_sum(window, "interestExpense")
             basic_eps_ttm = sum(item.get("eps") or 0 for item in window)
             op_expenses_ttm = flow_sum(window, "operatingExpenses") / M
             raw_rev = flow_sum(window, "revenue")
@@ -700,6 +709,7 @@ class FMPProvider(DataProvider):
                 "G&A ($M)": round(ga, 1),
                 "S&M ($M)": round(sm, 1),
                 "CAPEX ($M)": round(capex, 1),
+                "Interest Coverage": safe_div(op_income, int_exp_ttm),
             }
 
         return pd.DataFrame(results)
@@ -934,6 +944,48 @@ class FMPProvider(DataProvider):
 
         return df[["Open", "High", "Low", "Close", "Volume"]]
 
+    # ── Historical ratios ──────────────────────────────────────────
+
+    def get_historical_ratios(self, ticker: str, mode: str = "annual") -> pd.DataFrame:
+        period = "quarter" if mode == "quarterly" else "annual"
+        limit = 40 if mode == "quarterly" else 10
+        data = _fmp_get("ratios", {"symbol": ticker, "period": period, "limit": limit})
+        if not data:
+            return pd.DataFrame()
+
+        col_order = []
+        results = {}
+        for item in data:
+            date_str = item.get("date", "")
+            dt = datetime.strptime(date_str, "%Y-%m-%d")
+            if mode == "quarterly":
+                fmp_period = item.get("period", "")
+                if fmp_period and fmp_period.startswith("Q"):
+                    label = f"{fmp_period} '{dt.strftime('%y')}"
+                else:
+                    label = _quarter_label(dt)
+            else:
+                label = str(dt.year)
+
+            if label in results:
+                label = f"{label} ({date_str})"
+
+            col_order.append(label)
+            results[label] = {
+                "P/E Ratio": item.get("priceToEarningsRatio"),
+                "P/S Ratio": item.get("priceToSalesRatio"),
+                "P/B Ratio": item.get("priceToBookRatio"),
+                "EV/EBITDA": item.get("enterpriseValueMultiple"),
+                "P/FCF Ratio": item.get("priceToFreeCashFlowRatio"),
+                "Debt/Equity": item.get("debtToEquityRatio"),
+                "Current Ratio": item.get("currentRatio"),
+                "Dividend Yield (%)": round((item.get("dividendYield") or 0) * 100, 2),
+            }
+
+        df = pd.DataFrame(results)
+        df = df.reindex(columns=col_order)
+        return df
+
     def get_quote(self, ticker: str) -> dict:
         data = _fmp_get("quote", {"symbol": ticker})
         q = data[0] if isinstance(data, list) and data else (data if isinstance(data, dict) else {})
@@ -943,6 +995,7 @@ class FMPProvider(DataProvider):
             "change_pct": q.get("changesPercentage"),
             "open": q.get("open"),
             "previous_close": q.get("previousClose"),
+            "name": q.get("name"),
         }
 
 
@@ -1215,6 +1268,9 @@ if _HAS_YFINANCE:
         def get_price_history(self, ticker: str, period: str = "3y") -> pd.DataFrame:
             return self._ticker(ticker).history(period=period)
 
+        def get_historical_ratios(self, ticker: str, mode: str = "annual") -> pd.DataFrame:
+            return pd.DataFrame()  # Not implemented for yfinance fallback
+
 
 # ── Earnings calendar (standalone, not tied to a provider) ──────────
 
@@ -1222,6 +1278,88 @@ def fetch_earnings_calendar(from_date: str, to_date: str) -> list[dict]:
     """Fetch upcoming earnings for a date range from FMP."""
     try:
         data = _fmp_get("earnings-calendar", {"from": from_date, "to": to_date})
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def fetch_stock_news(ticker: str, limit: int = 10) -> list[dict]:
+    """Fetch recent news for a ticker from FMP."""
+    try:
+        data = _fmp_get("news/stock", {"symbols": ticker, "limit": limit})
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def fetch_ticker_earnings(ticker: str, limit: int = 4) -> list[dict]:
+    """Fetch earnings history/upcoming for a specific ticker from FMP."""
+    try:
+        data = _fmp_get("earnings", {"symbol": ticker, "limit": limit})
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+# ── FRED helpers ──────────────────────────────────────────────────────
+
+_FRED_BASE = "https://api.stlouisfed.org/fred/series/observations"
+
+
+def _get_fred_key() -> str:
+    """Load FRED API key from Streamlit secrets or environment."""
+    try:
+        return st.secrets["fred"]["api_key"]
+    except Exception:
+        key = os.environ.get("FRED_API_KEY", "")
+        if not key:
+            raise ValueError("FRED API key not found in secrets or environment.")
+        return key
+
+
+def fetch_fred_series(series_id, observation_start=None, observation_end=None):
+    """Fetch FRED series → DataFrame with DatetimeIndex + float 'value' column.
+    Drops missing values (FRED returns '.' for gaps)."""
+    try:
+        params = {
+            "series_id": series_id,
+            "api_key": _get_fred_key(),
+            "file_type": "json",
+        }
+        if observation_start:
+            params["observation_start"] = observation_start
+        if observation_end:
+            params["observation_end"] = observation_end
+        resp = requests.get(_FRED_BASE, params=params, timeout=15)
+        resp.raise_for_status()
+        data = resp.json().get("observations", [])
+        df = pd.DataFrame(data)
+        if df.empty:
+            return pd.DataFrame(columns=["value"])
+        df["date"] = pd.to_datetime(df["date"])
+        df = df.set_index("date")
+        df["value"] = pd.to_numeric(df["value"], errors="coerce")
+        df = df.dropna(subset=["value"])
+        return df[["value"]]
+    except Exception:
+        return pd.DataFrame(columns=["value"])
+
+
+# ── FMP macro helpers ─────────────────────────────────────────────────
+
+def fetch_treasury_rates(from_date: str, to_date: str) -> list[dict]:
+    """FMP treasury-rates → list of dicts with month1..year30 fields."""
+    try:
+        data = _fmp_get("treasury-rates", {"from": from_date, "to": to_date})
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def fetch_econ_calendar(from_date: str, to_date: str) -> list[dict]:
+    """FMP economic-calendar → list of dicts with event/date/country/actual/estimate/previous/impact."""
+    try:
+        data = _fmp_get("economic-calendar", {"from": from_date, "to": to_date})
         return data if isinstance(data, list) else []
     except Exception:
         return []

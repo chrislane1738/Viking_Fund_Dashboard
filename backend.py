@@ -7,7 +7,6 @@ import streamlit as st
 from supabase import create_client, Client
 
 # ── Friendly error messages ──────────────────────────────────────────
-MAX_GROUPS = 3
 MAX_STOCKS_PER_GROUP = 10
 MAX_COMPARISON_GROUPS = 3
 
@@ -177,11 +176,8 @@ def create_watchlist_group(user_id: str, name: str) -> dict:
     """Create a new watchlist group. Returns {success, group, error}."""
     try:
         existing = get_watchlist_groups(user_id)
-        if len(existing) >= MAX_GROUPS:
-            return {"success": False, "group": None,
-                    "error": f"Maximum of {MAX_GROUPS} groups allowed."}
         used_positions = {g["position"] for g in existing}
-        next_pos = next(p for p in range(MAX_GROUPS) if p not in used_positions)
+        next_pos = (max(used_positions) + 1) if used_positions else 0
         row = {"user_id": user_id, "name": name.strip(), "position": next_pos}
         res = _sb().table("watchlist_groups").insert(row).execute()
         invalidate_watchlist_cache()
@@ -211,23 +207,19 @@ def delete_watchlist_group(group_id: str, user_id: str) -> dict:
 
 
 def ensure_default_group(user_id: str) -> list | tuple:
-    """Ensure all 3 default groups exist. Returns sorted list or ([], error)."""
-    _DEFAULT_NAMES = ["Group 1", "Group 2", "Group 3"]
+    """Ensure at least one default group exists. Returns sorted list or ([], error)."""
     groups = get_watchlist_groups(user_id)
     if isinstance(groups, tuple):
         return groups  # ([], error_string)
-    existing_positions = {g["position"] for g in groups}
-    for pos, name in enumerate(_DEFAULT_NAMES):
-        if pos not in existing_positions:
-            try:
-                row = {"user_id": user_id, "name": name, "position": pos}
-                _sb().table("watchlist_groups").insert(row).execute()
-            except Exception:
-                pass  # may already exist by name
-    # Re-fetch to get the full sorted list
-    groups = get_watchlist_groups(user_id)
-    if isinstance(groups, tuple):
-        return groups
+    if not groups:
+        try:
+            row = {"user_id": user_id, "name": "Group 1", "position": 0}
+            _sb().table("watchlist_groups").insert(row).execute()
+        except Exception:
+            pass
+        groups = get_watchlist_groups(user_id)
+        if isinstance(groups, tuple):
+            return groups
     invalidate_watchlist_cache()
     return groups
 
