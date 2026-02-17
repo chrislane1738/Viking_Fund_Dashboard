@@ -1214,6 +1214,20 @@ div[role="dialog"] .stCheckbox label, div[role="dialog"] .stCheckbox label span 
 .stToggle [data-testid="stWidgetLabel"] span, .stToggle [data-testid="stWidgetLabel"] div,
 .stCheckbox label, .stCheckbox label span, .stCheckbox label p,
 [data-testid="stCheckbox"] label span, [data-testid="stCheckbox"] label p { color: #31333F !important; }
+/* Sidebar collapse/expand button — keep gray */
+[data-testid*="ollapsed"] button,
+[data-testid*="ollapsed"] button svg,
+[data-testid*="ollapsed"] button svg *,
+[data-testid*="ollapsed"] *,
+[data-testid="stSidebar"] [data-testid*="BaseButton-header"],
+[data-testid="stSidebar"] [data-testid*="BaseButton-header"] svg,
+[data-testid="stSidebar"] [data-testid*="BaseButton-header"] svg *,
+button[kind="header"] svg *,
+button[kind="headerNoPadding"] svg * {
+    color: #808495 !important;
+    fill: #808495 !important;
+    stroke: #808495 !important;
+}
 </style>
 """
 _DARK_CSS = """
@@ -1313,6 +1327,25 @@ if _active_theme == "Light":
 elif _active_theme == "Dark":
     st.markdown(_DARK_CSS, unsafe_allow_html=True)
 
+# Dark mode: make sidebar collapse/expand button white
+if _active_theme == "Dark":
+    st.markdown("""<style>
+    [data-testid*="ollapsed"] button,
+    [data-testid*="ollapsed"] button svg,
+    [data-testid*="ollapsed"] button svg *,
+    [data-testid*="ollapsed"] span,
+    [data-testid*="ollapsed"] *,
+    [data-testid="stSidebar"] [data-testid*="BaseButton-header"],
+    [data-testid="stSidebar"] [data-testid*="BaseButton-header"] svg,
+    [data-testid="stSidebar"] [data-testid*="BaseButton-header"] svg *,
+    button[kind="header"] svg *,
+    button[kind="headerNoPadding"] svg * {
+        color: #fafafa !important;
+        fill: #fafafa !important;
+        stroke: #fafafa !important;
+    }
+    </style>""", unsafe_allow_html=True)
+
 st.sidebar.divider()
 
 # Custom CSS for sidebar navigation buttons
@@ -1324,6 +1357,8 @@ section[data-testid="stSidebar"] {
     min-width: 16.8rem !important;
     max-width: 16.8rem !important;
     flex: 0 0 16.8rem !important;
+    transition: width 0.3s ease, min-width 0.3s ease, max-width 0.3s ease,
+                flex 0.3s ease, margin-left 0.3s ease, transform 0.3s ease !important;
 }
 section[data-testid="stSidebar"] > div:first-child {
     width: 16.8rem !important;
@@ -1332,6 +1367,50 @@ div[data-testid="stSidebarContent"] {
     width: 16.8rem !important;
     max-width: 16.8rem !important;
 }
+
+/* ── Fluid expand: main content fills available space ── */
+[data-testid="stAppViewContainer"],
+[data-testid="stMain"] {
+    transition: margin-left 0.3s ease, padding-left 0.3s ease !important;
+}
+[data-testid="stMainBlockContainer"] {
+    max-width: 100% !important;
+    width: 100% !important;
+    transition: max-width 0.3s ease, width 0.3s ease, padding 0.3s ease !important;
+}
+
+/* ── Collapsed sidebar: force zero width ── */
+section[data-testid="stSidebar"][aria-expanded="false"] {
+    width: 0rem !important;
+    min-width: 0rem !important;
+    max-width: 0rem !important;
+    flex: 0 0 0rem !important;
+    overflow: hidden !important;
+}
+section[data-testid="stSidebar"][aria-expanded="false"] > div:first-child {
+    width: 0rem !important;
+}
+
+/* ── Expand button: keep visible when sidebar is collapsed ── */
+[data-testid="stSidebarCollapsedControl"] {
+    z-index: 999 !important;
+    visibility: visible !important;
+    opacity: 1 !important;
+}
+
+/* ── Main content: fill full width when sidebar is collapsed ── */
+.stApp:has(section[data-testid="stSidebar"][aria-expanded="false"]) [data-testid="stAppViewContainer"] {
+    margin-left: 0 !important;
+    padding-left: 0 !important;
+    width: 100vw !important;
+    max-width: 100vw !important;
+}
+.stApp:has(section[data-testid="stSidebar"][aria-expanded="false"]) [data-testid="stMain"] {
+    margin-left: 0 !important;
+    padding-left: 0 !important;
+    width: 100% !important;
+}
+
 
 /* ── Sidebar nav: lock every layer to prevent any movement ── */
 
