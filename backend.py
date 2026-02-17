@@ -2,6 +2,7 @@
 
 Handles authentication, profiles, watchlists, research notes, and activity logging.
 """
+from __future__ import annotations
 
 import streamlit as st
 from supabase import create_client, Client
