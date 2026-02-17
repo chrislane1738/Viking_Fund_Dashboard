@@ -953,6 +953,41 @@ class FMPProvider(DataProvider):
         if not data:
             return pd.DataFrame()
 
+        # For quarterly mode, FMP's P/S and EV/EBITDA use single-quarter
+        # denominators. Compute them from scratch using market cap, EV,
+        # and rolling 4-quarter revenue / EBITDA.
+        ttm_ps_ev = {}
+        if mode == "quarterly":
+            inc = _fmp_get("income-statement",
+                           {"symbol": ticker, "period": "quarter",
+                            "limit": limit + 3})
+            km = _fmp_get("key-metrics",
+                          {"symbol": ticker, "period": "quarter",
+                           "limit": limit})
+            # Build market-cap / EV lookup keyed by date
+            km_map = {}
+            if km:
+                for k in km:
+                    km_map[k.get("date")] = k
+            # Build rolling TTM revenue & EBITDA, then compute ratios
+            if inc and len(inc) >= 4:
+                # inc is newest-first; build TTM windows
+                for i in range(len(inc) - 3):
+                    window = inc[i:i + 4]
+                    q_date = window[0]["date"]
+                    ttm_rev = sum((w.get("revenue") or 0) for w in window)
+                    ttm_ebitda = sum((w.get("ebitda") or 0) for w in window)
+                    k = km_map.get(q_date, {})
+                    mcap = k.get("marketCap")
+                    ev = k.get("enterpriseValue")
+                    ps_ttm = None
+                    ev_ebitda_ttm = None
+                    if mcap and ttm_rev and ttm_rev != 0:
+                        ps_ttm = mcap / ttm_rev
+                    if ev and ttm_ebitda and ttm_ebitda != 0:
+                        ev_ebitda_ttm = ev / ttm_ebitda
+                    ttm_ps_ev[q_date] = {"ps": ps_ttm, "ev_ebitda": ev_ebitda_ttm}
+
         col_order = []
         results = {}
         for item in data:
@@ -970,12 +1005,23 @@ class FMPProvider(DataProvider):
             if label in results:
                 label = f"{label} ({date_str})"
 
+            ps = item.get("priceToSalesRatio")
+            ev_ebitda = item.get("enterpriseValueMultiple")
+
+            # Override with properly computed TTM P/S and EV/EBITDA
+            if mode == "quarterly" and date_str in ttm_ps_ev:
+                computed = ttm_ps_ev[date_str]
+                if computed["ps"] is not None:
+                    ps = computed["ps"]
+                if computed["ev_ebitda"] is not None:
+                    ev_ebitda = computed["ev_ebitda"]
+
             col_order.append(label)
             results[label] = {
                 "P/E Ratio": item.get("priceToEarningsRatio"),
-                "P/S Ratio": item.get("priceToSalesRatio"),
+                "P/S Ratio": ps,
                 "P/B Ratio": item.get("priceToBookRatio"),
-                "EV/EBITDA": item.get("enterpriseValueMultiple"),
+                "EV/EBITDA": ev_ebitda,
                 "P/FCF Ratio": item.get("priceToFreeCashFlowRatio"),
                 "Debt/Equity": item.get("debtToEquityRatio"),
                 "Current Ratio": item.get("currentRatio"),

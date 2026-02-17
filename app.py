@@ -88,6 +88,51 @@ st.session_state.setdefault("wl_dip_ma", 200)
 
 def _render_auth_page():
     """Full-screen login / signup form."""
+    # Override Streamlit's default red primary accents with Viking green
+    st.markdown("""
+    <style>
+    /* Primary buttons (Sign In, Create Account) */
+    button[kind="primary"],
+    .stFormSubmitButton button {
+        background-color: #66BB6A !important;
+        border-color: #66BB6A !important;
+        color: #FFFFFF !important;
+    }
+    button[kind="primary"]:hover,
+    button[kind="primary"]:focus,
+    .stFormSubmitButton button:hover,
+    .stFormSubmitButton button:focus {
+        background-color: #57A35B !important;
+        border-color: #57A35B !important;
+        color: #FFFFFF !important;
+    }
+    button[kind="primary"]:active,
+    .stFormSubmitButton button:active {
+        background-color: #4E9C52 !important;
+        border-color: #4E9C52 !important;
+    }
+    /* Tab underline indicator */
+    [data-baseweb="tab-highlight"] {
+        background-color: #66BB6A !important;
+    }
+    /* Active tab text */
+    [data-baseweb="tab"][aria-selected="true"] {
+        color: #66BB6A !important;
+    }
+    /* Hovered tab text */
+    [data-baseweb="tab"]:hover {
+        color: #66BB6A !important;
+    }
+    /* Text input focus border */
+    [data-baseweb="input"]:focus-within {
+        border-color: #66BB6A !important;
+    }
+    input:focus {
+        border-color: #66BB6A !important;
+        box-shadow: 0 0 0 1px #66BB6A !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
     st.markdown("<div style='height: 5vh;'></div>", unsafe_allow_html=True)
     _al, _am, _ar = st.columns([1, 2, 1])
     with _am:
@@ -1149,14 +1194,14 @@ section[data-testid="stSidebar"] .stButton button:active {
 
 /* Active nav highlight — marker wrapper + sibling selector */
 section[data-testid="stSidebar"] .stElementContainer:has(.nav-active-wrap) + .stElementContainer .stButton button {
-    background: #6C8EEF !important;
+    background: #66BB6A !important;
     color: #FFFFFF !important;
 }
 section[data-testid="stSidebar"] .stElementContainer:has(.nav-active-wrap) + .stElementContainer .stButton button p {
     color: #FFFFFF !important;
 }
 section[data-testid="stSidebar"] .stElementContainer:has(.nav-active-wrap) + .stElementContainer .stButton button:hover {
-    background: #7B9CF5 !important;
+    background: #78C67A !important;
 }
 
 /* Marker wrapper: absolutely positioned, zero layout impact */
@@ -1723,18 +1768,24 @@ if "My Watchlists" in page:
     _earnings_by_ticker = {}
     _matched_earnings = []
     if watchlist:
-        _today = datetime.now().strftime("%Y-%m-%d")
+        _today_str = datetime.now().strftime("%Y-%m-%d")
         _future = (datetime.now() + timedelta(days=90)).strftime("%Y-%m-%d")
-        _all_earnings = fetch_upcoming_earnings(_today, _future)
+
+        # Per-row column: next earnings date per ticker (no time limit)
+        for _item in watchlist:
+            _tk = _item["ticker"].upper()
+            _tk_earn = fetch_next_earnings(_tk)
+            _future_earn = [e for e in _tk_earn if (e.get("date") or "") >= _today_str]
+            if _future_earn:
+                _earnings_by_ticker[_tk] = _future_earn[0].get("date")
+
+        # Right-side box: 90-day calendar for upcoming earnings list
+        _all_earnings = fetch_upcoming_earnings(_today_str, _future)
         _wl_set = {item["ticker"].upper() for item in watchlist}
         _matched_earnings = sorted(
             [e for e in _all_earnings if e.get("symbol", "").upper() in _wl_set],
             key=lambda e: e.get("date", ""),
         )
-        for _e in _matched_earnings:
-            _sym = _e.get("symbol", "").upper()
-            if _sym not in _earnings_by_ticker:
-                _earnings_by_ticker[_sym] = _e.get("date")
 
     # ── Add ticker handler (must be defined before on_change ref) ─
     def _handle_add_ticker():
@@ -1781,8 +1832,7 @@ if "My Watchlists" in page:
                     with _rLogo:
                         st.markdown(
                             f'<img src="https://financialmodelingprep.com/image-stock/{_t}.png" '
-                            f'style="width:36px; height:36px; border-radius:8px; object-fit:contain; '
-                            f'background:#fff; margin-top:4px;" '
+                            f'height="32" style="vertical-align:middle; object-fit:contain;" '
                             f'onerror="this.style.display=\'none\'">',
                             unsafe_allow_html=True,
                         )
@@ -2103,6 +2153,7 @@ if "Macro Overview" in page:
                 ))
         fig.update_layout(
             height=320,
+            hovermode="x unified",
             xaxis=dict(title="Maturity", fixedrange=True),
             yaxis=dict(title="Yield (%)", fixedrange=True),
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
@@ -2225,6 +2276,7 @@ if "Macro Overview" in page:
             fig.add_hline(y=0, line_dash="dash", line_color="gray", line_width=1)
         fig.update_layout(
             height=280, showlegend=False,
+            hovermode="x unified",
             xaxis=dict(fixedrange=True),
             yaxis=dict(title="%", fixedrange=True),
             margin=dict(l=40, r=20, t=10, b=30),
@@ -2247,6 +2299,7 @@ if "Macro Overview" in page:
                 ))
         fig.update_layout(
             height=320,
+            hovermode="x unified",
             xaxis=dict(fixedrange=True),
             yaxis=dict(title="Yield (%)", fixedrange=True),
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
@@ -3059,7 +3112,21 @@ with st.expander("Key Fundamental Metrics", expanded=True):
 
 st.divider()
 with st.expander("Historical Multiples", expanded=False):
-    _ratios = fetch_ratios(ticker, "annual")
+    # ── Annual / TTM toggle ──
+    st.session_state.setdefault("multiples_mode_sel", "Annual")
+    _, _mtoggle_col, _ = st.columns([2, 3, 2])
+    with _mtoggle_col:
+        _mtc = st.columns(2)
+        for _mi, _mlabel in enumerate(["Annual", "TTM"]):
+            with _mtc[_mi]:
+                _mbtn_type = "primary" if st.session_state["multiples_mode_sel"] == _mlabel else "secondary"
+                if st.button(_mlabel, key=f"mult_mode_{_mlabel}", width="stretch", type=_mbtn_type):
+                    st.session_state["multiples_mode_sel"] = _mlabel
+                    st.rerun()
+    _mult_mode = st.session_state["multiples_mode_sel"]
+    _chart_mode = "ttm" if _mult_mode == "TTM" else "annual"
+
+    _ratios = fetch_ratios(ticker, "quarterly" if _mult_mode == "TTM" else "annual")
     if _ratios is not None and not _ratios.empty:
         _ratio_dates_all = list(_ratios.columns[::-1])
 
@@ -3071,7 +3138,8 @@ with st.expander("Historical Multiples", expanded=False):
         _TF_MAP = {"3Y": 3, "5Y": 5, "10Y": 10}
         _mult_tf = st.radio("Time Frame", ["3Y", "5Y", "10Y"],
                             index=1, horizontal=True, key="multiples_tf")
-        _n_periods = _TF_MAP[_mult_tf]
+        _pts_per_year = 4 if _mult_mode == "TTM" else 1
+        _n_periods = _TF_MAP[_mult_tf] * _pts_per_year
         _ratio_dates = _ratio_dates_all[-_n_periods:]
 
         # Current TTM multiples from company info
@@ -3089,11 +3157,19 @@ with st.expander("Historical Multiples", expanded=False):
 
         _ratio_dates_curr = _ratio_dates + ["Current"]
 
-        # Forward P/E history
+        # Forward P/E history — always annual data
         _fwd_pe_map = fetch_forward_pe_history(ticker)
-        _fwd_pe_vals = [_fwd_pe_map.get(d) for d in _ratio_dates]
+        if _mult_mode == "TTM":
+            # In TTM mode, keep Forward P/E as annual with its own x-axis
+            _fwd_pe_years = sorted(_fwd_pe_map.keys())
+            _fwd_n = _TF_MAP[_mult_tf]
+            _fwd_dates = _fwd_pe_years[-_fwd_n:]
+        else:
+            _fwd_dates = _ratio_dates
+        _fwd_pe_vals = [_fwd_pe_map.get(d) for d in _fwd_dates]
         _fwd_pe_curr = info.get("forward_pe") if info else None
         _fwd_pe_vals_curr = _fwd_pe_vals + [_fwd_pe_curr]
+        _fwd_dates_curr = _fwd_dates + ["Current"]
 
         _MULT_CHARTS = [
             ("P/E Ratio", "P/E Ratio", "hist_pe", "mult_stats_pe"),
@@ -3110,10 +3186,12 @@ with st.expander("Historical Multiples", expanded=False):
                                        title, show_stats=show)
             return _builder
 
+        _fwd_pe_title = "Forward P/E (Annual)" if _mult_mode == "TTM" else "Forward P/E"
+
         def _build_fwd_pe():
             show = st.session_state.get("mult_stats_fwd_pe", False)
-            return _multiples_line(_ratio_dates_curr, _fwd_pe_vals_curr,
-                                   "Forward P/E", show_stats=show)
+            return _multiples_line(_fwd_dates_curr, _fwd_pe_vals_curr,
+                                   _fwd_pe_title, show_stats=show)
 
         # Row 1: P/E | Forward P/E
         c1, c2 = st.columns(2)
@@ -3121,7 +3199,7 @@ with st.expander("Historical Multiples", expanded=False):
             st.toggle("Show Median & Average", key="mult_stats_pe")
             builder = _make_mult_builder("P/E Ratio", "P/E Ratio", "mult_stats_pe")
             fig = builder()
-            _display_chart(fig, "hist_pe", mode="annual",
+            _display_chart(fig, "hist_pe", mode=_chart_mode,
                            toggles=[{"label": "Show Median & Average",
                                       "key": "mult_stats_pe"}],
                            chart_builder=builder)
@@ -3141,7 +3219,7 @@ with st.expander("Historical Multiples", expanded=False):
                 st.toggle("Show Median & Average", key=toggle_key)
                 builder = _make_mult_builder(row_name, title, toggle_key)
                 fig = builder()
-                _display_chart(fig, chart_key, mode="annual",
+                _display_chart(fig, chart_key, mode=_chart_mode,
                                toggles=[{"label": "Show Median & Average",
                                           "key": toggle_key}],
                                chart_builder=builder)
@@ -3150,7 +3228,7 @@ with st.expander("Historical Multiples", expanded=False):
         st.toggle("Show Median & Average", key="mult_stats_ev")
         _ev_builder = _make_mult_builder("EV/EBITDA", "EV/EBITDA", "mult_stats_ev")
         fig = _ev_builder()
-        _display_chart(fig, "hist_ev_ebitda", mode="annual",
+        _display_chart(fig, "hist_ev_ebitda", mode=_chart_mode,
                        toggles=[{"label": "Show Median & Average",
                                   "key": "mult_stats_ev"}],
                        chart_builder=_ev_builder)
