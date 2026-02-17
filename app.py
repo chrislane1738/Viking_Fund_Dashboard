@@ -2166,6 +2166,10 @@ if "Macro Overview" in page:
         return data
 
     _fred_data = _macro_fetch_fred()
+    _fred_has_data = any(not df.empty for df in _fred_data.values())
+
+    if not _fred_has_data:
+        st.warning("FRED data unavailable — check that the FRED API key is configured in Streamlit secrets.")
 
     _macro_tf_radios = [{"label": "Time Frame", "key": "macro_tf",
                          "options": ["1Y", "5Y", "10Y", "Max"]}]
