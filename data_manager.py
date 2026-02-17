@@ -25,7 +25,7 @@ try:
         expire_after=3600,
     )
     _HAS_YFINANCE = True
-except ImportError:
+except Exception:
     _HAS_YFINANCE = False
 
 
